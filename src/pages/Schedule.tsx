@@ -466,7 +466,7 @@ export default function Schedule() {
     refetchInterval: 5000,
   });
 
-  const [newSchedules, setNewSchedules] = useState<ScheduleConfig[]>([]);
+  const [newSchedules, setNewSchedules] = useState<Array<ScheduleConfig & { clientKey: string }>>([]);
 
   const handleSave = async (config: ScheduleConfig) => {
     const saved = await saveSchedule(config);
