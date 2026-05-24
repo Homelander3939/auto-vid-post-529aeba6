@@ -659,6 +659,11 @@ async function processJob(jobId, options = {}) {
           const { data: fscheds } = await supabase.from('folder_schedules').select('folder_path').eq('enabled', true);
           for (const s of fscheds || []) addCand(s.folder_path);
         } catch {}
+        // Last-resort fallback: well-known default AI Video folder. Files
+        // picked manually via the browser don't expose absolute paths, so if
+        // none of the configured folders contained the file, also try this.
+        addCand('D:\\AI Video');
+        addCand('D:/AI Video');
 
         const targetName = path.basename(String(job.video_file_name));
         const targetLower = targetName.toLowerCase();
