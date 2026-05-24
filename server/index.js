@@ -635,6 +635,55 @@ async function processJob(jobId, options = {}) {
       }
     }
 
+    // === FALLBACK: storage-backed jobs (manually picked via browser file input) ===
+    // The browser can't reveal absolute paths, so the worker downloads from Supabase
+    // storage to a temp dir. If the user wants auto-delete, search known local folders
+    // (global default + every enabled recurring schedule folder) for a file with the
+    // same basename and delete it + its sibling .txt.
+    if (allSucceeded && settings.deleteAfterUpload !== false && !isLocalSource && job.video_file_name) {
+      try {
+        const candidates = new Set();
+        const addCand = (raw) => {
+          if (!raw) return;
+          try {
+            const abs = path.resolve(raw);
+            if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) candidates.add(abs);
+          } catch {}
+        };
+        addCand(settings.folderPath);
+        try {
+          const { data: scheds } = await supabase.from('schedule_config').select('folder_path').eq('enabled', true);
+          for (const s of scheds || []) addCand(s.folder_path);
+        } catch {}
+        try {
+          const { data: fscheds } = await supabase.from('folder_schedules').select('folder_path').eq('enabled', true);
+          for (const s of fscheds || []) addCand(s.folder_path);
+        } catch {}
+
+        const targetName = path.basename(String(job.video_file_name));
+        const targetLower = targetName.toLowerCase();
+        const stemLower = targetLower.replace(/\.[^.]+$/, '');
+        const deleted = [];
+        for (const dir of candidates) {
+          let entries = [];
+          try { entries = fs.readdirSync(dir); } catch { continue; }
+          for (const f of entries) {
+            const fl = f.toLowerCase();
+            if (fl === targetLower || fl === `${stemLower}.txt`) {
+              try { fs.unlinkSync(path.join(dir, f)); deleted.push(f); } catch {}
+            }
+          }
+          if (deleted.some((d) => d.toLowerCase() === targetLower)) break; // found the video; stop searching other folders
+        }
+        if (deleted.length) {
+          cleanupLine = `\n🧹 Cleaned up source files: ${deleted.join(' + ')}`;
+          console.log(`[Worker] Job ${jobId} cleaned up storage-backed source files: ${deleted.join(', ')}`);
+        }
+      } catch (e) {
+        console.error(`[Worker] Storage-backed cleanup failed for job ${jobId}:`, e.message);
+      }
+    }
+
     const summaryMsg = `${emoji} <b>Upload ${finalStatus}</b>\n📹 ${metadata.title || job.video_file_name}\n\n${lines.join('\n')}${cleanupLine}`;
 
     await notifyTelegram(settings, summaryMsg);
