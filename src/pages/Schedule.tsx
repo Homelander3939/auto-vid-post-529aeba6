@@ -66,10 +66,11 @@ function humanReadableCron(cron: string) {
 const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local';
 
 // ---- Single schedule editor ----
-function ScheduleEditor({ config, onSave, onDelete }: { config: ScheduleConfig; onSave: (c: ScheduleConfig) => void; onDelete?: () => void }) {
+function ScheduleEditor({ config, onSave, onDelete }: { config: ScheduleConfig; onSave: (c: ScheduleConfig) => Promise<ScheduleConfig | void> | ScheduleConfig | void; onDelete?: () => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState(!config.id); // new ones start expanded
+  const [saving, setSaving] = useState(false);
   const [name, setName] = useState(config.name);
   const [enabled, setEnabled] = useState(config.enabled);
   const [folderPath, setFolderPath] = useState(config.folderPath);
@@ -116,20 +117,66 @@ function ScheduleEditor({ config, onSave, onDelete }: { config: ScheduleConfig; 
   const summary = humanReadableCron(cronExpression);
 
   useEffect(() => {
+    if (expanded || !config.id) return;
+    const nextParsed = cronToState(config.cronExpression);
+    setName(config.name);
+    setEnabled(config.enabled);
+    setFolderPath(config.folderPath);
+    setUploadIntervalMinutes(config.uploadIntervalMinutes || 10);
+    setPlatforms(config.platforms);
+    setEndAt(config.endAt);
+    setMaxRuns(config.maxRuns ?? null);
+    setUseMaxRuns(config.maxRuns != null);
+    setMaxVideos(config.maxVideos ?? null);
+    setUseMaxVideos(config.maxVideos != null);
+    setSelectedAccounts(config.accountSelections || {});
+    setMode(nextParsed.mode);
+    setHour(nextParsed.hour);
+    setMinute(nextParsed.minute);
+    setWeekdays(nextParsed.weekdays);
+    setInterval(nextParsed.interval);
+    setUseDuration(!!config.endAt);
+  }, [expanded, config.id, config.name, config.enabled, config.cronExpression, config.folderPath, config.uploadIntervalMinutes, config.endAt, config.maxRuns, config.maxVideos, JSON.stringify(config.platforms), JSON.stringify(config.accountSelections)]);
+
+  useEffect(() => {
     if (!useDuration) { setEndAt(null); return; }
     const ms = durationUnit === 'hours' ? durationAmount * 3600000 : durationUnit === 'days' ? durationAmount * 86400000 : durationAmount * 604800000;
     setEndAt(new Date(Date.now() + ms).toISOString());
   }, [useDuration, durationAmount, durationUnit]);
 
-  const handleSave = () => {
-    onSave({
+  const buildCurrentConfig = (nextEnabled = enabled): ScheduleConfig => ({
       ...config,
-      name, enabled, cronExpression, platforms, folderPath, endAt, uploadIntervalMinutes,
+      name, enabled: nextEnabled, cronExpression, platforms, folderPath, endAt, uploadIntervalMinutes,
       accountSelections: selectedAccounts,
       maxRuns: useMaxRuns ? maxRuns : null,
       maxVideos: useMaxVideos ? maxVideos : null,
-    });
-    setExpanded(false);
+  });
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(buildCurrentConfig());
+      setExpanded(false);
+    } catch (e: any) {
+      toast({ title: 'Schedule save failed', description: e?.message || 'Could not save schedule', variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleEnabledChange = async (nextEnabled: boolean) => {
+    const previous = enabled;
+    setEnabled(nextEnabled);
+    if (!config.id) return;
+    setSaving(true);
+    try {
+      await onSave(buildCurrentConfig(nextEnabled));
+    } catch (e: any) {
+      setEnabled(previous);
+      toast({ title: 'Schedule toggle failed', description: e?.message || 'Could not save active state', variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleRunNow = async () => {
@@ -177,7 +224,7 @@ function ScheduleEditor({ config, onSave, onDelete }: { config: ScheduleConfig; 
             </div>
             {expanded ? <ChevronUp className="w-4 h-4 shrink-0 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 shrink-0 text-muted-foreground" />}
           </button>
-          <Switch checked={enabled} onCheckedChange={setEnabled} />
+          <Switch checked={enabled} onCheckedChange={handleEnabledChange} disabled={saving} />
         </div>
 
         {expanded && (
@@ -370,8 +417,8 @@ function ScheduleEditor({ config, onSave, onDelete }: { config: ScheduleConfig; 
             </div>
 
             <div className="flex gap-2">
-              <Button onClick={handleSave} className="flex-1 gap-2" size="sm">
-                <Save className="w-3.5 h-3.5" /> Save
+              <Button onClick={handleSave} className="flex-1 gap-2" size="sm" disabled={saving}>
+                <Save className="w-3.5 h-3.5" /> {saving ? 'Saving…' : 'Save'}
               </Button>
               {config.id && (
                 <Button onClick={handleRunNow} variant="secondary" size="sm" className="gap-2">
@@ -419,15 +466,20 @@ export default function Schedule() {
     refetchInterval: 5000,
   });
 
-  const [newSchedules, setNewSchedules] = useState<ScheduleConfig[]>([]);
+  const [newSchedules, setNewSchedules] = useState<Array<ScheduleConfig & { clientKey: string }>>([]);
 
   const handleSave = async (config: ScheduleConfig) => {
     const saved = await saveSchedule(config);
     if (!config.id) {
-      setNewSchedules(prev => prev.filter(s => s !== config));
+      const clientKey = (config as any).clientKey;
+      setNewSchedules(prev => clientKey ? prev.filter(s => (s as any).clientKey !== clientKey) : prev.slice(1));
     }
+    qc.setQueryData<ScheduleConfig[]>(['schedules'], (current = []) => (
+      config.id ? current.map((item) => item.id === saved.id ? saved : item) : [...current, saved]
+    ));
     qc.invalidateQueries({ queryKey: ['schedules'] });
     toast({ title: 'Schedule saved', description: saved.enabled ? humanReadableCron(saved.cronExpression) : 'Disabled' });
+    return saved;
   };
 
   const handleDelete = async (id: number) => {
@@ -444,6 +496,7 @@ export default function Schedule() {
 
   const addNew = () => {
     setNewSchedules(prev => [...prev, {
+      clientKey: crypto.randomUUID(),
       name: `Schedule ${schedules.length + prev.length + 1}`,
       enabled: false,
       cronExpression: '0 9 * * *',
@@ -482,7 +535,7 @@ export default function Schedule() {
           <ScheduleEditor key={s.id} config={s} onSave={handleSave} onDelete={() => handleDelete(s.id!)} />
         ))}
         {newSchedules.map((s, i) => (
-          <ScheduleEditor key={`new-${i}`} config={s} onSave={handleSave} onDelete={() => setNewSchedules(prev => prev.filter((_, j) => j !== i))} />
+          <ScheduleEditor key={(s as any).clientKey || `new-${i}`} config={s} onSave={handleSave} onDelete={() => setNewSchedules(prev => prev.filter((_, j) => j !== i))} />
         ))}
 
         {schedules.length === 0 && newSchedules.length === 0 && (
