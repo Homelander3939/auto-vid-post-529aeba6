@@ -1,0 +1,1 @@
+ALTER TABLE public.schedule_config DROP CONSTRAINT IF EXISTS schedule_config_id_check;
