@@ -494,10 +494,12 @@ export async function saveSchedule(config: ScheduleConfig): Promise<ScheduleConf
   } as any;
 
   if (config.id) {
-    const { data } = await supabase.from('schedule_config').update(payload).eq('id', config.id).select().single();
+    const { data, error } = await supabase.from('schedule_config').update(payload).eq('id', config.id).select().single();
+    if (error) throw new Error(`Failed to update schedule: ${error.message}`);
     return data ? { ...config, id: data.id } : config;
   } else {
-    const { data } = await supabase.from('schedule_config').insert(payload).select().single();
+    const { data, error } = await supabase.from('schedule_config').insert(payload).select().single();
+    if (error) throw new Error(`Failed to create schedule: ${error.message}`);
     return data ? { ...config, id: data.id } : config;
   }
 }
