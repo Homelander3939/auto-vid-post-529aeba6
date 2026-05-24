@@ -2964,6 +2964,7 @@ async function pollFolderWatchers() {
 
   // Collect every folder we should watch, with a "source" descriptor for defaults.
   const folders = new Map(); // absPath -> { platforms, accountSelections, intensity }
+  const scheduledFolders = new Set();
   const addFolder = (raw, platforms, accountSelections, intensity) => {
     const norm = normalizeFolderPath(raw);
     if (!norm || !fs.existsSync(norm)) return;
@@ -2971,10 +2972,19 @@ async function pollFolderWatchers() {
     if (!folders.has(abs)) folders.set(abs, { platforms, accountSelections, intensity });
   };
 
+  try {
+    const { data: schedules } = await supabase.from('schedule_config').select('folder_path').eq('enabled', true);
+    for (const s of schedules || []) {
+      const norm = normalizeFolderPath(s.folder_path);
+      if (norm && fs.existsSync(norm)) scheduledFolders.add(path.resolve(norm));
+    }
+  } catch (e) { console.error('[FolderWatch] schedule exclusions read failed:', e.message); }
+
   // 1. Global default folder
   if (settings.folderPath) {
     const defaultPlatforms = ['youtube', 'tiktok', 'instagram'].filter((p) => settings[p]?.enabled && settings[p]?.email);
-    if (defaultPlatforms.length) addFolder(settings.folderPath, defaultPlatforms, {}, 0);
+    const defaultFolderAbs = path.resolve(normalizeFolderPath(settings.folderPath));
+    if (defaultPlatforms.length && !scheduledFolders.has(defaultFolderAbs)) addFolder(settings.folderPath, defaultPlatforms, {}, 0);
   }
 
   // 2. Recurring schedules are intentionally NOT watched here. They must only
