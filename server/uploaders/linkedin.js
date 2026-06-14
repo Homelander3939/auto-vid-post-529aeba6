@@ -41,19 +41,34 @@ async function openComposer(page) {
     .waitFor({ state: 'visible', timeout: 20000 });
 }
 
-async function waitForRealMediaPreview(page, timeout = 45000) {
+async function countRealMediaPreviews(page) {
+  return await page.locator('div[role="dialog"]').last().evaluate((dialog) => {
+    const reject = /(avatar|profile|presence|actor|member|identity|entity-photo|ghost-person|article|external|url-preview|link-preview|third-party|embed)/i;
+    const accept = /(share-images|share-media|media|image|photo|video|carousel|creation-state)/i;
+    const nodes = Array.from(dialog.querySelectorAll('img, video, [style*="background-image"]'));
+    return nodes.filter((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 120 || r.height < 80) return false;
+      const chain = [];
+      let cur = el;
+      for (let i = 0; cur && i < 5; i++, cur = cur.parentElement) {
+        chain.push(`${cur.className || ''} ${cur.getAttribute?.('data-test-id') || ''} ${cur.getAttribute?.('aria-label') || ''}`);
+      }
+      const text = chain.join(' ');
+      if (reject.test(text)) return false;
+      const src = el.getAttribute('src') || '';
+      const style = el.getAttribute('style') || '';
+      const explicitMedia = src.startsWith('blob:') || src.startsWith('data:image') || ((/media\.licdn|media-exp|dms\/image/i.test(src) || /background-image:\s*url/i.test(style)) && accept.test(text));
+      return explicitMedia || accept.test(text);
+    }).length;
+  }).catch(() => 0);
+}
+
+async function waitForRealMediaPreview(page, expectedCount = 1, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const count = await page.locator('div[role="dialog"] img').evaluateAll((imgs) => imgs.filter((img) => {
-      const r = img.getBoundingClientRect();
-      const src = img.getAttribute('src') || '';
-      const cls = `${img.className || ''} ${(img.closest('[class]') || {}).className || ''}`.toLowerCase();
-      const looksLikeMedia = src.startsWith('blob:') || src.includes('media-exp') || src.includes('media.licdn') || cls.includes('image') || cls.includes('media');
-      const bigEnough = r.width >= 90 && r.height >= 70;
-      const notAvatar = !cls.includes('avatar') && !cls.includes('presence-entity') && !cls.includes('profile');
-      return looksLikeMedia && bigEnough && notAvatar;
-    }).length).catch(() => 0);
-    if (count > 0) return true;
+    const count = await countRealMediaPreviews(page);
+    if (count >= Math.max(1, expectedCount)) return true;
     await page.waitForTimeout(750);
   }
   return false;
@@ -72,44 +87,69 @@ async function resolvePostedLinkedInUrl(page, fallbackUrl) {
 }
 
 async function attachImagesToComposer(page, imageFiles) {
+  if (!imageFiles.length) return;
   const attachBtn = page.locator(
     'div[role="dialog"] button[aria-label*="photo" i], div[role="dialog"] button[aria-label*="image" i], div[role="dialog"] button[aria-label*="media" i], div[role="dialog"] button[aria-label*="add a photo" i]'
   ).first();
-  await attachBtn.waitFor({ state: 'visible', timeout: 15000 });
-  await attachBtn.scrollIntoViewIfNeeded().catch(() => {});
+  const expectedCount = Math.min(imageFiles.length, 9);
 
-  // Start waiting BEFORE the click. LinkedIn often opens the native Windows file
-  // picker directly; if we don't capture that FileChooser event, automation gets
-  // stuck behind the popup shown in the user's screenshot.
-  const chooserPromise = page.waitForEvent('filechooser', { timeout: 12000 }).catch(() => null);
-  await attachBtn.click({ force: true }).catch(async () => { await attachBtn.click(); });
-  const chooser = await chooserPromise;
-  if (chooser) {
-    await chooser.setFiles(imageFiles);
-    console.log(`[LinkedIn] Selected ${imageFiles.length} image(s) through native file chooser`);
-  } else {
-    await page.waitForTimeout(1000);
-    const candidates = [
-      page.locator('div[role="dialog"] input[type="file"][accept*="image"]').last(),
-      page.locator('input[type="file"][accept*="image"]').last(),
-      page.locator('input[type="file"]').last(),
-    ];
-    let attached = false;
-    for (const input of candidates) {
-      if (!(await input.count().catch(() => 0))) continue;
-      attached = await input.setInputFiles(imageFiles, { timeout: 10000 }).then(() => true).catch(() => false);
-      if (attached) break;
+  // Prefer LinkedIn's real file input when it already exists. This bypasses the
+  // native Windows picker entirely and is more reliable than clicking the image
+  // button first.
+  let attached = false;
+  const directInputs = [
+    page.locator('div[role="dialog"] input[type="file"][accept*="image"]').last(),
+    page.locator('input[type="file"][accept*="image"]').last(),
+    page.locator('div[role="dialog"] input[type="file"]').last(),
+  ];
+  for (const input of directInputs) {
+    if (!(await input.count().catch(() => 0))) continue;
+    attached = await input.setInputFiles(imageFiles, { timeout: 12000 }).then(() => true).catch(() => false);
+    if (attached) {
+      console.log(`[LinkedIn] Selected ${imageFiles.length} image(s) through file input`);
+      break;
     }
-    if (!attached) throw new Error('LinkedIn image picker opened but no controllable file input was found.');
   }
 
-  if (!(await waitForRealMediaPreview(page, 45000))) {
+  if (!attached) {
+    await attachBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await attachBtn.scrollIntoViewIfNeeded().catch(() => {});
+
+    // Start waiting BEFORE the click. LinkedIn often opens the native Windows file
+    // picker directly; if we don't capture that FileChooser event, automation gets
+    // stuck behind the popup shown in the user's screenshot.
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 15000 }).catch(() => null);
+    await attachBtn.click({ force: true }).catch(async () => { await attachBtn.click(); });
+    const chooser = await chooserPromise;
+    if (chooser) {
+      await chooser.setFiles(imageFiles);
+      attached = true;
+      console.log(`[LinkedIn] Selected ${imageFiles.length} image(s) through native file chooser`);
+    }
+
+    if (!attached) {
+      await page.waitForTimeout(1000);
+      const candidates = [
+        page.locator('div[role="dialog"] input[type="file"][accept*="image"]').last(),
+        page.locator('input[type="file"][accept*="image"]').last(),
+        page.locator('input[type="file"]').last(),
+      ];
+      for (const input of candidates) {
+        if (!(await input.count().catch(() => 0))) continue;
+        attached = await input.setInputFiles(imageFiles, { timeout: 10000 }).then(() => true).catch(() => false);
+        if (attached) break;
+      }
+    }
+  }
+  if (!attached) throw new Error('LinkedIn image picker opened but no controllable file input was found.');
+
+  if (!(await waitForRealMediaPreview(page, expectedCount, 45000))) {
     throw new Error('LinkedIn image file was selected, but no real media preview appeared. Aborting to avoid a text-only post.');
   }
   // LinkedIn can render a preview before the upload is committed. Wait longer and
   // require the real preview to still be present before pressing Next/Done.
   await page.waitForTimeout(5000 + (imageFiles.length - 1) * 1500);
-  if (!(await waitForRealMediaPreview(page, 10000))) {
+  if (!(await waitForRealMediaPreview(page, expectedCount, 10000))) {
     throw new Error('LinkedIn image preview disappeared before it was attached. Aborting to avoid a text-only post.');
   }
 
@@ -129,9 +169,11 @@ async function attachImagesToComposer(page, imageFiles) {
     await page.waitForTimeout(2000);
   }
 
-  if (!(await waitForRealMediaPreview(page, 20000))) {
+  const finalCount = await countRealMediaPreviews(page);
+  if (finalCount < expectedCount) {
     throw new Error('LinkedIn image was selected but no real preview remained in the post composer. Aborting to avoid a text-only post.');
   }
+  console.log(`[LinkedIn] Confirmed ${finalCount}/${expectedCount} media preview(s) in composer`);
 }
 
 async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts = {}) {
@@ -148,16 +190,23 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       throw new Error('LinkedIn requires login. Use Prepare in Settings to log in once.');
     }
 
+    const fullText = hashtags.length
+      ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
+      : (description || '');
+
     await openComposer(page);
+
+    // Attach media BEFORE inserting URLs/text. Otherwise LinkedIn may render a
+    // large article link preview and our media checks can mistake that preview
+    // for an uploaded photo, causing text/link-only posts.
+    if (imageFiles.length) {
+      await attachImagesToComposer(page, imageFiles);
+    }
 
     const editor = page.locator('div[role="dialog"] div[contenteditable="true"]').first();
     await editor.waitFor({ state: 'visible', timeout: 15000 });
     await editor.click();
     await page.waitForTimeout(300);
-
-    const fullText = hashtags.length
-      ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
-      : (description || '');
 
     // Try insertText first (fastest), fall back to typing if the editor didn't pick it up.
     await page.keyboard.insertText(fullText).catch(() => {});
@@ -169,8 +218,8 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(500);
     }
 
-    if (imageFiles.length) {
-      await attachImagesToComposer(page, imageFiles);
+    if (imageFiles.length && !(await waitForRealMediaPreview(page, Math.min(imageFiles.length, 9), 10000))) {
+      throw new Error('LinkedIn uploaded media was not present after filling the post text. Aborting to avoid a text-only post.');
     }
 
     // Click Post — wait for it to enable. Filter out "Post settings" / "Post to anyone" buttons.

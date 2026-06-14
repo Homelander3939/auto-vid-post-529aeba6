@@ -93,6 +93,51 @@ function stableStatusKey(results) {
   return results.map((r) => `${r.name}:${r.status || ''}`).join('|');
 }
 
+function originalNameFromStoragePath(storagePath) {
+  const base = path.basename(String(storagePath || ''));
+  return base.replace(/^\d+-[a-z0-9]{4,12}-/i, '');
+}
+
+function manifestNameFromImageName(name) {
+  const stem = String(name || '').replace(/\.[^.]+$/, '');
+  const m = stem.match(/^(.*?-post-\d+)(?:-|$)/i);
+  return m ? `${m[1]}.txt` : null;
+}
+
+async function inferSourceMeta(supabase, post) {
+  const names = new Set();
+  const imagePaths = Array.isArray(post.image_paths) && post.image_paths.length
+    ? post.image_paths
+    : (post.image_path ? [post.image_path] : []);
+  for (const p of imagePaths) {
+    const imageName = originalNameFromStoragePath(p);
+    if (imageName) names.add(imageName);
+    const manifest = manifestNameFromImageName(imageName);
+    if (manifest) names.add(manifest);
+  }
+  if (!names.size) return null;
+
+  const folders = new Set(['D:\\news posts', 'D:/news posts']);
+  try {
+    const { data: schedules } = await supabase.from('social_post_schedules').select('folder_path').eq('source_type', 'folder');
+    for (const s of schedules || []) if (s.folder_path) folders.add(String(s.folder_path));
+  } catch {}
+  try {
+    const { data: settings } = await supabase.from('app_settings').select('folder_path').eq('id', 1).single();
+    if (settings?.folder_path) folders.add(String(settings.folder_path));
+  } catch {}
+
+  for (const folder of folders) {
+    try {
+      if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) continue;
+      const entries = fs.readdirSync(folder);
+      const files = entries.filter((f) => names.has(f));
+      if (files.length) return { folder, files };
+    } catch {}
+  }
+  return null;
+}
+
 async function processSocialPost(supabase, postId, notify) {
   if (processing.has(postId)) return;
   processing.add(postId);
@@ -175,7 +220,8 @@ async function processSocialPost(supabase, postId, notify) {
 
     // Cleanup must not depend on Telegram delivery. If at least one platform posted,
     // remove the source bundle so folder schedules behave like video uploads.
-    const cleanupLine = cleanupSourceFiles(post.source_meta, successCount > 0);
+    const cleanupMeta = post.source_meta || await inferSourceMeta(supabase, post);
+    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0);
 
     if (notify) {
       try {

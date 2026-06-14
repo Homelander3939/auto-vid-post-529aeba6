@@ -2000,6 +2000,10 @@ app.post('/api/social-posts/scan-bundles', (req, res) => {
       images: b.images.map((img) => img.missing
         ? { name: img.name, missing: true }
         : { name: img.name, mime: img.mime, dataBase64: img.buffer.toString('base64') }),
+      sourceMeta: {
+        folder: folderPath,
+        files: [b.manifestName, ...b.images.filter((img) => !img.missing).map((img) => img.name)],
+      },
     }));
     res.json({ folderPath, count: bundles.length, bundles });
   } catch (e) {

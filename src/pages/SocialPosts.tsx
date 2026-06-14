@@ -23,6 +23,7 @@ import {
   SOCIAL_PLATFORMS,
   type SocialAccount,
   type SocialPost,
+  type SourceMeta,
   type AIGenerateOutput,
 } from '@/lib/socialPosts';
 import AIPostComposer from '@/components/AIPostComposer';
@@ -52,6 +53,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
   const [aiPrompt, setAiPrompt] = useState<string | null>(null);
   const [aiSources, setAiSources] = useState<any[]>([]);
   const [platformVariants, setPlatformVariants] = useState<Record<string, { description: string; hashtags: string[] }>>({});
+  const [sourceMeta, setSourceMeta] = useState<SourceMeta | null>(null);
   // Which platform's variant is currently shown in the preview switcher.
   const [previewPlatform, setPreviewPlatform] = useState<string>('x');
 
@@ -77,6 +79,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
   const handleImageChange = (file: File | null) => {
     setImageFile(file);
     setAiImagePath(null);
+    setSourceMeta(null);
     if (imagePreview) URL.revokeObjectURL(imagePreview);
     setImagePreview(file ? URL.createObjectURL(file) : null);
     // Clear bundle extras whenever the user picks a manual single image.
@@ -105,10 +108,12 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
     if (imagePreview) URL.revokeObjectURL(imagePreview);
     extraImagePreviews.forEach((u) => URL.revokeObjectURL(u));
     setAiImagePath(null);
+    setSourceMeta(null);
     setImageFile(first ? first.file : null);
     setImagePreview(first ? URL.createObjectURL(first.file) : null);
     setExtraImageFiles(rest.map((r) => r.file));
     setExtraImagePreviews(rest.map((r) => URL.createObjectURL(r.file)));
+    setSourceMeta(b.sourceMeta || null);
 
     // Auto-pick default accounts for each platform when available.
     setAccountSelections((prev) => {
@@ -129,6 +134,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
     setAiPrompt(prompt);
     setAiSources(out.sources || []);
     setPlatformVariants(out.variants || {});
+    setSourceMeta(null);
     if (out.imagePath && out.imageUrl) {
       setAiImagePath(out.imagePath);
       setImageFile(null);
@@ -185,6 +191,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       aiPrompt,
       aiSources,
       platformVariants: Object.keys(platformVariants).length ? platformVariants : undefined,
+      sourceMeta,
     });
 
     // Force draft status when saving without accounts
@@ -230,6 +237,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       accountSelections: accountsForBundle,
       scheduledAt: mode === 'schedule' ? (scheduledIso || null) : null,
       platformVariants: variants,
+      sourceMeta: b.sourceMeta,
     });
     if (mode === 'draft') {
       try { await (await import('@/integrations/supabase/client')).supabase
@@ -272,6 +280,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       setExtraImageFiles([]); setExtraImagePreviews([]);
       setScheduledAt(''); setAiPrompt(null); setAiSources([]);
       setPlatformVariants({});
+      setSourceMeta(null);
       onCreated();
     } catch (e: any) {
       toast({ title: 'Failed', description: e.message, variant: 'destructive' });

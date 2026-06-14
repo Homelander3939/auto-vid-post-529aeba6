@@ -25,6 +25,7 @@ export interface SocialPostResult {
 }
 
 export interface PlatformVariant { description: string; hashtags: string[] }
+export interface SourceMeta { folder: string; files: string[] }
 
 export interface SocialPost {
   id: string;
@@ -40,6 +41,7 @@ export interface SocialPost {
   ai_sources: any[];
   platform_results: SocialPostResult[];
   platform_variants: Record<string, PlatformVariant>;
+  source_meta?: SourceMeta | null;
   created_at: string;
   completed_at: string | null;
 }
@@ -297,6 +299,7 @@ export async function createSocialPost(input: {
   aiPrompt?: string | null;
   aiSources?: any[];
   platformVariants?: Record<string, PlatformVariant>;
+  sourceMeta?: SourceMeta | null;
 }): Promise<SocialPost> {
   const platformResults: SocialPostResult[] = input.platforms.map((name) => ({ name, status: 'pending' }));
   const status = input.scheduledAt ? 'scheduled' : 'pending';
@@ -313,6 +316,7 @@ export async function createSocialPost(input: {
     status,
     platform_results: platformResults,
     platform_variants: input.platformVariants || {},
+    source_meta: input.sourceMeta || null,
   };
   const { data, error } = await (supabase as any).from('social_posts').insert(payload).select().single();
   if (error || !data) throw new Error(error?.message || 'Failed to create post');
