@@ -154,7 +154,7 @@ function PlatformAccountCard({
 
   const startEdit = (account: PlatformAccount) => {
     setEditingId(account.id);
-    setForm({ label: account.label, email: account.email, password: account.password, recoveryPhone: (account as any).recovery_phone || '' });
+    setForm({ label: account.label, email: account.email, password: account.password, recoveryPhone: (account as any).recovery_phone || '', targetUrl: (account as any).target_url || '' });
     setAdding(true);
   };
 
