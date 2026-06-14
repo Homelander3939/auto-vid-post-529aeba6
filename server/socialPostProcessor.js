@@ -103,6 +103,7 @@ async function processSocialPost(supabase, postId, notify) {
         }, {
           accountId: account.id,
           browserProfileId: profile?.id,
+          targetUrl: account.target_url || null,
         });
         r.status = 'success';
         r.url = out?.url || '';

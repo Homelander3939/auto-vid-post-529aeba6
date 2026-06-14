@@ -52,6 +52,7 @@ interface AccountFormData {
   email: string;
   password: string;
   recoveryPhone: string;
+  targetUrl: string;
 }
 
 function PlatformAccountCard({
@@ -68,7 +69,7 @@ function PlatformAccountCard({
   const { toast } = useToast();
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<AccountFormData>({ label: '', email: '', password: '', recoveryPhone: '' });
+  const [form, setForm] = useState<AccountFormData>({ label: '', email: '', password: '', recoveryPhone: '', targetUrl: '' });
   const [saving, setSaving] = useState(false);
   const [preparingId, setPreparingId] = useState<string | null>(null);
 
@@ -82,7 +83,7 @@ function PlatformAccountCard({
   };
 
   const resetForm = () => {
-    setForm({ label: '', email: '', password: '', recoveryPhone: '' });
+    setForm({ label: '', email: '', password: '', recoveryPhone: '', targetUrl: '' });
     setAdding(false);
     setEditingId(null);
   };
@@ -99,6 +100,7 @@ function PlatformAccountCard({
         label: form.label.trim() || form.email.split('@')[0],
         email: form.email.trim(),
         password: form.password,
+        target_url: form.targetUrl.trim() || null,
         enabled: true,
       };
       if (platform === 'youtube') {
@@ -153,7 +155,7 @@ function PlatformAccountCard({
 
   const startEdit = (account: PlatformAccount) => {
     setEditingId(account.id);
-    setForm({ label: account.label, email: account.email, password: account.password, recoveryPhone: (account as any).recovery_phone || '' });
+    setForm({ label: account.label, email: account.email, password: account.password, recoveryPhone: (account as any).recovery_phone || '', targetUrl: (account as any).target_url || '' });
     setAdding(true);
   };
 
@@ -350,6 +352,23 @@ function PlatformAccountCard({
                 </p>
               </div>
             )}
+            <div className="space-y-2">
+              <Label className="text-xs">Post to URL (optional)</Label>
+              <Input
+                value={form.targetUrl}
+                onChange={(e) => setForm((f) => ({ ...f, targetUrl: e.target.value }))}
+                placeholder={
+                  platform === 'youtube' ? 'https://studio.youtube.com/channel/UCxxxx'
+                  : platform === 'tiktok' ? 'https://www.tiktok.com/@yourhandle'
+                  : platform === 'instagram' ? 'https://www.instagram.com/yourhandle'
+                  : 'https://...'
+                }
+                className="h-9 font-mono text-xs"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Optional. Leave empty to upload on the account's default profile/channel. Set this if you need to upload to a specific channel/page under this account.
+              </p>
+            </div>
             <div className="flex gap-2">
               <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1.5">
                 <Check className="w-3.5 h-3.5" />

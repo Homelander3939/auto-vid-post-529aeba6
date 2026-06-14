@@ -9,7 +9,8 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
   const context = await launchPersistent('x', opts);
   try {
     const page = context.pages()[0] || await context.newPage();
-    await page.goto(X_COMPOSE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    const targetUrl = (opts && opts.targetUrl && /^https?:\/\//i.test(opts.targetUrl)) ? opts.targetUrl : X_COMPOSE_URL;
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(3000);
 
     // If redirected to login, surface a clear error

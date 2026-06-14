@@ -24,7 +24,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import {
-  FileText, Upload, AlertTriangle, CheckCircle2, RefreshCw, Send, Eye, Save,
+  FileText, Upload, AlertTriangle, CheckCircle2, RefreshCw, Send, Eye, Save, Calendar, Rocket,
 } from 'lucide-react';
 
 const PLATFORM_LABELS: Record<string, string> = { x: 'X', linkedin: 'LinkedIn', facebook: 'Facebook' };
@@ -342,6 +342,19 @@ export default function UploadPostImporter({ onLoad, onSendToQueue }: Props) {
   const [previewDraft, setPreviewDraft] = useState('');
   const [previewImgIdx, setPreviewImgIdx] = useState(0);
 
+  // Batch upload / schedule state
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchMode, setBatchMode] = useState<'now' | 'schedule'>('schedule');
+  const [batchCount, setBatchCount] = useState<number>(0);
+  const [batchStart, setBatchStart] = useState<string>(() => {
+    const d = new Date(Date.now() + 5 * 60 * 1000);
+    d.setSeconds(0, 0);
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  });
+  const [batchIntervalValue, setBatchIntervalValue] = useState<number>(30);
+  const [batchIntervalUnit, setBatchIntervalUnit] = useState<'minutes' | 'hours'>('minutes');
+  const [batchRunning, setBatchRunning] = useState(false);
+
   const openPreview = (bundleId: string, platform: string, text: string) => {
     setPreviewBundleId(bundleId);
     setPreviewPlatform(platform);
@@ -607,11 +620,50 @@ export default function UploadPostImporter({ onLoad, onSendToQueue }: Props) {
         )}
 
         {bundles.length > 0 && (
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">
-              {bundles.length} bundle{bundles.length === 1 ? '' : 's'} detected · matched by filename + date
-            </span>
-            <Button size="sm" variant="ghost" onClick={reset}>Clear</Button>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-xs text-muted-foreground">
+                {bundles.length} bundle{bundles.length === 1 ? '' : 's'} detected · matched by filename + date
+              </span>
+              <Button size="sm" variant="ghost" onClick={reset}>Clear</Button>
+            </div>
+            {onSendToQueue && bundles.some((b) => b.errors.length === 0) && (
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={batchRunning}
+                  onClick={async () => {
+                    const ready = bundles.filter((b) => b.errors.length === 0);
+                    if (!ready.length) return;
+                    if (!confirm(`Upload all ${ready.length} ready bundle${ready.length === 1 ? '' : 's'} now?`)) return;
+                    setBatchRunning(true);
+                    let ok = 0; let fail = 0;
+                    for (const b of ready) {
+                      try { await onSendToQueue(b, 'now'); rememberImported(b.id); ok++; }
+                      catch (e: any) { fail++; console.error('Batch upload failed:', e?.message); }
+                    }
+                    setBatchRunning(false);
+                    toast({ title: `Batch upload queued`, description: `${ok} sent · ${fail} failed` });
+                  }}
+                >
+                  <Rocket className="w-3.5 h-3.5" /> Upload all now ({bundles.filter((b) => b.errors.length === 0).length})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  disabled={batchRunning}
+                  onClick={() => {
+                    setBatchMode('schedule');
+                    setBatchCount(bundles.filter((b) => b.errors.length === 0).length);
+                    setBatchOpen(true);
+                  }}
+                >
+                  <Calendar className="w-3.5 h-3.5" /> Schedule batch…
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
@@ -819,6 +871,82 @@ export default function UploadPostImporter({ onLoad, onSendToQueue }: Props) {
                 <Send className="w-4 h-4" /> Save &amp; post this version
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Batch schedule dialog — stagger N bundles starting at a time, every X interval */}
+      <Dialog open={batchOpen} onOpenChange={setBatchOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Calendar className="w-4 h-4" /> Schedule batch upload</DialogTitle>
+            <DialogDescription>
+              Stagger the next N ready bundles at a fixed interval, just like the video folder scheduler.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label className="text-xs">How many bundles</Label>
+              <Input
+                type="number"
+                min={1}
+                max={bundles.filter((b) => b.errors.length === 0).length}
+                value={batchCount}
+                onChange={(e) => setBatchCount(Math.max(1, Number(e.target.value) || 1))}
+                className="h-9"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {bundles.filter((b) => b.errors.length === 0).length} ready · earliest postIndex first
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Start at</Label>
+              <Input type="datetime-local" value={batchStart} onChange={(e) => setBatchStart(e.target.value)} className="h-9" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Interval</Label>
+                <Input type="number" min={1} value={batchIntervalValue} onChange={(e) => setBatchIntervalValue(Math.max(1, Number(e.target.value) || 1))} className="h-9" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Unit</Label>
+                <select
+                  value={batchIntervalUnit}
+                  onChange={(e) => setBatchIntervalUnit(e.target.value as 'minutes' | 'hours')}
+                  className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                >
+                  <option value="minutes">Minutes</option>
+                  <option value="hours">Hours</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchOpen(false)} disabled={batchRunning}>Cancel</Button>
+            <Button
+              disabled={batchRunning || !onSendToQueue}
+              onClick={async () => {
+                if (!onSendToQueue) return;
+                const ready = bundles.filter((b) => b.errors.length === 0).slice(0, Math.max(1, batchCount));
+                if (!ready.length) return;
+                const startMs = new Date(batchStart).getTime();
+                if (!Number.isFinite(startMs)) { toast({ title: 'Pick a valid start time', variant: 'destructive' }); return; }
+                const stepMs = batchIntervalValue * (batchIntervalUnit === 'hours' ? 3600_000 : 60_000);
+                setBatchRunning(true);
+                let ok = 0; let fail = 0;
+                for (let i = 0; i < ready.length; i++) {
+                  const iso = new Date(startMs + i * stepMs).toISOString();
+                  try { await onSendToQueue(ready[i], 'schedule', iso); rememberImported(ready[i].id); ok++; }
+                  catch (e: any) { fail++; console.error('Batch schedule failed:', e?.message); }
+                }
+                setBatchRunning(false);
+                setBatchOpen(false);
+                toast({ title: 'Batch scheduled', description: `${ok} scheduled · ${fail} failed · every ${batchIntervalValue}${batchIntervalUnit === 'hours' ? 'h' : 'm'}` });
+              }}
+              className="gap-1.5"
+            >
+              <Calendar className="w-4 h-4" /> {batchRunning ? 'Scheduling…' : 'Schedule'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

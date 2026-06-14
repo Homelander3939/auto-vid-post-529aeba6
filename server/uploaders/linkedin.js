@@ -11,7 +11,8 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
   const context = await launchPersistent('linkedin', opts);
   try {
     const page = context.pages()[0] || await context.newPage();
-    await page.goto(LI_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    const targetUrl = (opts && opts.targetUrl && /^https?:\/\//i.test(opts.targetUrl)) ? opts.targetUrl : LI_FEED_URL;
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(3000);
 
     const url = page.url();

@@ -23,10 +23,10 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
   );
 }
 
-const PLATFORM_META: Record<string, { title: string; desc: string }> = {
-  x: { title: 'X (Twitter)', desc: 'X.com login — browser opens x.com/compose' },
-  linkedin: { title: 'LinkedIn', desc: 'LinkedIn.com login — browser opens linkedin.com/feed' },
-  facebook: { title: 'Facebook', desc: 'Facebook.com login — browser opens facebook.com' },
+const PLATFORM_META: Record<string, { title: string; desc: string; urlPlaceholder: string }> = {
+  x: { title: 'X (Twitter)', desc: 'X.com login — browser opens x.com/compose', urlPlaceholder: 'https://x.com/yourhandle' },
+  linkedin: { title: 'LinkedIn', desc: 'LinkedIn.com login — browser opens linkedin.com/feed', urlPlaceholder: 'https://www.linkedin.com/company/your-page/admin/' },
+  facebook: { title: 'Facebook', desc: 'Facebook.com login — browser opens facebook.com', urlPlaceholder: 'https://www.facebook.com/YourPageName' },
 };
 
 export default function SocialAccountCard({
@@ -43,14 +43,14 @@ export default function SocialAccountCard({
   const { toast } = useToast();
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ label: '', email: '', password: '' });
+  const [form, setForm] = useState({ label: '', email: '', password: '', target_url: '' });
   const [saving, setSaving] = useState(false);
   const [preparingId, setPreparingId] = useState<string | null>(null);
 
   const platformAccounts = accounts.filter((a) => a.platform === platform);
-  const meta = PLATFORM_META[platform] || { title: platform, desc: '' };
+  const meta = PLATFORM_META[platform] || { title: platform, desc: '', urlPlaceholder: 'https://...' };
 
-  const resetForm = () => { setForm({ label: '', email: '', password: '' }); setAdding(false); setEditingId(null); };
+  const resetForm = () => { setForm({ label: '', email: '', password: '', target_url: '' }); setAdding(false); setEditingId(null); };
 
   const handleSave = async () => {
     if (!form.email.trim()) { toast({ title: 'Email/username is required', variant: 'destructive' }); return; }
@@ -61,6 +61,7 @@ export default function SocialAccountCard({
         label: form.label.trim() || form.email.split('@')[0],
         email: form.email.trim(),
         password: form.password,
+        target_url: form.target_url.trim() || null,
         enabled: true,
       };
       if (editingId) payload.id = editingId;
@@ -91,7 +92,7 @@ export default function SocialAccountCard({
 
   const startEdit = (a: SocialAccount) => {
     setEditingId(a.id);
-    setForm({ label: a.label, email: a.email, password: a.password });
+    setForm({ label: a.label, email: a.email, password: a.password, target_url: (a as any).target_url || '' });
     setAdding(true);
   };
 
@@ -199,6 +200,11 @@ export default function SocialAccountCard({
             <div className="space-y-2">
               <Label className="text-xs">Password</Label>
               <PasswordInput value={form.password} onChange={(v) => setForm((f) => ({ ...f, password: v }))} placeholder="••••••••" />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-xs">Post to URL (optional)</Label>
+              <Input value={form.target_url} onChange={(e) => setForm((f) => ({ ...f, target_url: e.target.value }))} placeholder={meta.urlPlaceholder} className="h-9" />
+              <p className="text-[11px] text-muted-foreground">Leave empty to post on the account's own profile. Set to a Page / Company URL to post there instead.</p>
             </div>
             <div className="flex gap-2">
               <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1.5">

@@ -6,7 +6,8 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
   const context = await launchPersistent('facebook', opts);
   try {
     const page = context.pages()[0] || await context.newPage();
-    await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    const targetUrl = (opts && opts.targetUrl && /^https?:\/\//i.test(opts.targetUrl)) ? opts.targetUrl : 'https://www.facebook.com/';
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(3000);
 
     const url = page.url();

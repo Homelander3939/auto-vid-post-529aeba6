@@ -397,6 +397,7 @@ export type Database = {
           password: string
           platform: string
           recovery_phone: string | null
+          target_url: string | null
         }
         Insert: {
           created_at?: string
@@ -408,6 +409,7 @@ export type Database = {
           password?: string
           platform: string
           recovery_phone?: string | null
+          target_url?: string | null
         }
         Update: {
           created_at?: string
@@ -419,6 +421,7 @@ export type Database = {
           password?: string
           platform?: string
           recovery_phone?: string | null
+          target_url?: string | null
         }
         Relationships: []
       }
@@ -543,6 +546,7 @@ export type Database = {
           label: string
           password: string
           platform: string
+          target_url: string | null
         }
         Insert: {
           created_at?: string
@@ -553,6 +557,7 @@ export type Database = {
           label?: string
           password?: string
           platform: string
+          target_url?: string | null
         }
         Update: {
           created_at?: string
@@ -563,6 +568,7 @@ export type Database = {
           label?: string
           password?: string
           platform?: string
+          target_url?: string | null
         }
         Relationships: []
       }
