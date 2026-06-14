@@ -2663,6 +2663,7 @@ async function processSocialFolderSchedules(opts = {}) {
             for (const p of platforms) if (bundle.texts[p]) variants[p] = { description: bundle.texts[p], hashtags: [] };
             const description = bundle.texts[platforms[0]] || bundle.texts.x || bundle.texts.linkedin || '';
 
+            const sourceFiles = [bundle.manifestName, ...bundle.images.filter((i) => !i.missing).map((i) => i.name)];
             await supabase.from('social_posts').insert({
               description,
               image_path: paths[0] || null,
@@ -2673,6 +2674,7 @@ async function processSocialFolderSchedules(opts = {}) {
               platform_variants: variants,
               status: 'pending',
               scheduled_at: null,
+              source_meta: { folder: folderPath, files: sourceFiles },
             });
             newlyImported.push(bundle.manifestName);
             console.log(`[FolderSched] Queued post from ${bundle.manifestName}`);
