@@ -43,7 +43,7 @@ export default function SocialAccountCard({
   const { toast } = useToast();
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ label: '', email: '', password: '' });
+  const [form, setForm] = useState({ label: '', email: '', password: '', target_url: '' });
   const [saving, setSaving] = useState(false);
   const [preparingId, setPreparingId] = useState<string | null>(null);
 
