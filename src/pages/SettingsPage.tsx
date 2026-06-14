@@ -83,7 +83,7 @@ function PlatformAccountCard({
   };
 
   const resetForm = () => {
-    setForm({ label: '', email: '', password: '', recoveryPhone: '' });
+    setForm({ label: '', email: '', password: '', recoveryPhone: '', targetUrl: '' });
     setAdding(false);
     setEditingId(null);
   };
