@@ -201,6 +201,11 @@ export default function SocialAccountCard({
               <Label className="text-xs">Password</Label>
               <PasswordInput value={form.password} onChange={(v) => setForm((f) => ({ ...f, password: v }))} placeholder="••••••••" />
             </div>
+            <div className="space-y-2">
+              <Label className="text-xs">Post to URL (optional)</Label>
+              <Input value={form.target_url} onChange={(e) => setForm((f) => ({ ...f, target_url: e.target.value }))} placeholder={meta.urlPlaceholder} className="h-9" />
+              <p className="text-[11px] text-muted-foreground">Leave empty to post on the account's own profile. Set to a Page / Company URL to post there instead.</p>
+            </div>
             <div className="flex gap-2">
               <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1.5">
                 <Check className="w-3.5 h-3.5" />
