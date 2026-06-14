@@ -127,19 +127,32 @@ async function processSocialPost(supabase, postId, notify) {
     }).eq('id', postId);
 
     if (notify) {
-      const scheduleTag = post.scheduled_at ? ' (scheduled)' : '';
-      const lines = results.map((r) =>
-        r.status === 'success' ? `✅ ${r.name}${r.url ? `\n   🔗 ${r.url}` : ''}`
-        : r.status === 'error' ? `❌ ${r.name}: ${r.error || 'unknown error'}`
-        : `⚪ ${r.name}: ${r.status}`
-      );
-      const emoji = finalStatus === 'completed' ? '🎉' : finalStatus === 'partial' ? '⚠️' : '❌';
-      const preview = (post.description || '').slice(0, 120).replace(/\s+/g, ' ').trim();
-      await notify(`${emoji} Social post ${finalStatus}${scheduleTag}\n${preview}\n\n${lines.join('\n\n')}`);
+      try {
+        const scheduleTag = post.scheduled_at ? ' (scheduled)' : '';
+        const lines = results.map((r) =>
+          r.status === 'success' ? `✅ ${r.name}${r.url ? `\n   🔗 ${r.url}` : ''}`
+          : r.status === 'error' ? `❌ ${r.name}: ${r.error || 'unknown error'}`
+          : `⚪ ${r.name}: ${r.status}`
+        );
+        const emoji = finalStatus === 'completed' ? '🎉' : finalStatus === 'partial' ? '⚠️' : '❌';
+        const preview = (post.description || '').slice(0, 120).replace(/\s+/g, ' ').trim();
+        const msg = `${emoji} Social post ${finalStatus}${scheduleTag}\n${preview}\n\n${lines.join('\n\n')}`;
+        console.log(`[SocialPosts] Notifying Telegram: ${finalStatus} (${results.length} platforms)`);
+        await notify(msg);
+        console.log('[SocialPosts] Telegram notify OK');
+      } catch (e) {
+        console.error('[SocialPosts] Telegram notify FAILED:', e.message);
+      }
+    } else {
+      console.warn('[SocialPosts] No notify callback provided — skipping Telegram');
     }
   } catch (e) {
     console.error('[SocialPosts] processor error:', e.message);
     await supabase.from('social_posts').update({ status: 'failed' }).eq('id', postId);
+    // Try to send a failure notification even when the processor itself errored
+    if (notify) {
+      try { await notify(`❌ Social post processor error: ${e.message}`); } catch {}
+    }
   } finally {
     for (const p of localImages) { try { fs.unlinkSync(p); } catch {} }
     processing.delete(postId);
