@@ -230,6 +230,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       accountSelections: accountsForBundle,
       scheduledAt: mode === 'schedule' ? (scheduledIso || null) : null,
       platformVariants: variants,
+      sourceMeta: b.sourceMeta,
     });
     if (mode === 'draft') {
       try { await (await import('@/integrations/supabase/client')).supabase
