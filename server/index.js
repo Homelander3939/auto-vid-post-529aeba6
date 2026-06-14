@@ -112,12 +112,13 @@ function sanitizeOutgoingMessage(text) {
 
 async function notifyTelegram(settings, message) {
   const text = sanitizeOutgoingMessage(message);
-  if (!text) return;
-  if (!settings.telegram?.enabled || !settings.telegram?.chatId) return;
+  if (!text) return false;
+  if (!settings.telegram?.enabled || !settings.telegram?.chatId) return false;
   try {
     await sendTelegram(settings.telegram.botToken, settings.telegram.chatId, text, settings.backend);
   } catch (e) {
     console.error('[Telegram] Notification failed:', e.message);
+    return false;
   }
   // Mirror into telegram_messages so AI Chat (web) shows the same bot reply that the
   // user sees in Telegram. getUpdates does not return our own outgoing messages, so
@@ -138,6 +139,7 @@ async function notifyTelegram(settings, message) {
     // Non-fatal; logging only.
     console.warn('[Telegram] Mirror to chat history failed:', e.message);
   }
+  return true;
 }
 
 const uploaders = { youtube: uploadToYouTube, tiktok: uploadToTikTok, instagram: uploadToInstagram };

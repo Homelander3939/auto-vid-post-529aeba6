@@ -12,6 +12,15 @@ const uploaders = { x: uploadToX, facebook: uploadToFacebook, linkedin: uploadTo
 
 const processing = new Set();
 
+function cleanTelegramText(value, max = 900) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
 async function loadAccounts(supabase, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return new Map();
@@ -130,15 +139,16 @@ async function processSocialPost(supabase, postId, notify) {
       try {
         const scheduleTag = post.scheduled_at ? ' (scheduled)' : '';
         const lines = results.map((r) =>
-          r.status === 'success' ? `✅ ${r.name}${r.url ? `\n   🔗 ${r.url}` : ''}`
-          : r.status === 'error' ? `❌ ${r.name}: ${r.error || 'unknown error'}`
+          r.status === 'success' ? `✅ ${cleanTelegramText(r.name, 40)}${r.url ? `\n   🔗 ${cleanTelegramText(r.url, 300)}` : ''}`
+          : r.status === 'error' ? `❌ ${cleanTelegramText(r.name, 40)}: ${cleanTelegramText(r.error || 'unknown error')}`
           : `⚪ ${r.name}: ${r.status}`
         );
         const emoji = finalStatus === 'completed' ? '🎉' : finalStatus === 'partial' ? '⚠️' : '❌';
-        const preview = (post.description || '').slice(0, 120).replace(/\s+/g, ' ').trim();
+        const preview = cleanTelegramText(post.description || '', 120);
         const msg = `${emoji} Social post ${finalStatus}${scheduleTag}\n${preview}\n\n${lines.join('\n\n')}`;
         console.log(`[SocialPosts] Notifying Telegram: ${finalStatus} (${results.length} platforms)`);
-        await notify(msg);
+        const delivered = await notify(msg);
+        if (delivered === false) throw new Error('notify callback returned false');
         console.log('[SocialPosts] Telegram notify OK');
       } catch (e) {
         console.error('[SocialPosts] Telegram notify FAILED:', e.message);

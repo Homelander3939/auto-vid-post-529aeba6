@@ -41,6 +41,68 @@ async function openComposer(page) {
     .waitFor({ state: 'visible', timeout: 20000 });
 }
 
+async function attachImagesToComposer(page, imageFiles) {
+  const attachBtn = page.locator(
+    'div[role="dialog"] button[aria-label*="photo" i], div[role="dialog"] button[aria-label*="image" i], div[role="dialog"] button[aria-label*="media" i], div[role="dialog"] button[aria-label*="add a photo" i]'
+  ).first();
+  await attachBtn.waitFor({ state: 'visible', timeout: 15000 });
+  await attachBtn.scrollIntoViewIfNeeded().catch(() => {});
+
+  // Start waiting BEFORE the click. LinkedIn often opens the native Windows file
+  // picker directly; if we don't capture that FileChooser event, automation gets
+  // stuck behind the popup shown in the user's screenshot.
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: 12000 }).catch(() => null);
+  await attachBtn.click({ force: true }).catch(async () => { await attachBtn.click(); });
+  const chooser = await chooserPromise;
+  if (chooser) {
+    await chooser.setFiles(imageFiles);
+    console.log(`[LinkedIn] Selected ${imageFiles.length} image(s) through native file chooser`);
+  } else {
+    await page.waitForTimeout(1000);
+    const candidates = [
+      page.locator('div[role="dialog"] input[type="file"][accept*="image"]').last(),
+      page.locator('input[type="file"][accept*="image"]').last(),
+      page.locator('input[type="file"]').last(),
+    ];
+    let attached = false;
+    for (const input of candidates) {
+      if (!(await input.count().catch(() => 0))) continue;
+      attached = await input.setInputFiles(imageFiles, { timeout: 10000 }).then(() => true).catch(() => false);
+      if (attached) break;
+    }
+    if (!attached) throw new Error('LinkedIn image picker opened but no controllable file input was found.');
+  }
+
+  const preview = page.locator(
+    'div[role="dialog"] img[src^="blob:"], div[role="dialog"] img[src*="media-exp"], div[role="dialog"] img[src*="media.licdn"], div[role="dialog"] [data-test-id*="image-preview" i], div[role="dialog"] [class*="image-detour-view" i] img'
+  ).first();
+  await preview.waitFor({ state: 'visible', timeout: 30000 });
+  await page.waitForTimeout(1500);
+
+  // Confirm the media dialog and return to the main composer.
+  for (let i = 0; i < 4; i++) {
+    const nextBtn = page.locator(
+      'div[role="dialog"] button:has-text("Next"), div[role="dialog"] button:has-text("Done"), div[role="dialog"] button[aria-label="Next"], div[role="dialog"] button[aria-label="Done"]'
+    ).last();
+    if (!(await nextBtn.isVisible().catch(() => false))) break;
+    for (let wait = 0; wait < 12; wait++) {
+      const disabled = await nextBtn.getAttribute('aria-disabled').catch(() => null);
+      const isDisabled = await nextBtn.isDisabled().catch(() => false);
+      if (disabled !== 'true' && !isDisabled) break;
+      await page.waitForTimeout(500);
+    }
+    await nextBtn.click({ force: true }).catch(async () => { await nextBtn.click(); });
+    await page.waitForTimeout(2000);
+  }
+
+  const composerPreview = page.locator(
+    'div[role="dialog"] img[src^="blob:"], div[role="dialog"] img[src*="media-exp"], div[role="dialog"] img[src*="media.licdn"], div[role="dialog"] [class*="share-creation-state__preview" i] img'
+  ).first();
+  if (!(await composerPreview.isVisible().catch(() => false))) {
+    throw new Error('LinkedIn image was selected but no preview remained in the post composer.');
+  }
+}
+
 async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts = {}) {
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const context = await launchPersistent('linkedin', opts);
@@ -77,52 +139,7 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
     }
 
     if (imageFiles.length) {
-      // LinkedIn now opens a sub-detail dialog when you click Photo. We need to:
-      //  1) click the Photo button in the main composer
-      //  2) wait for the OS file input to be wired up (file input is added to DOM)
-      //  3) setInputFiles on the *image-typed* input — generic input[type=file] sometimes
-      //     hits a document picker
-      //  4) wait for the preview image to render
-      //  5) click "Next" / "Done" until we return to the main composer with the Post button
-      const attachBtn = page.locator(
-        'div[role="dialog"] button[aria-label*="photo" i], div[role="dialog"] button[aria-label*="image" i], div[role="dialog"] button[aria-label*="media" i], div[role="dialog"] button[aria-label*="add a photo" i]'
-      ).first();
-      await attachBtn.scrollIntoViewIfNeeded().catch(() => {});
-      await attachBtn.click().catch(() => {});
-      await page.waitForTimeout(1500);
-
-      // Prefer the image-specific input; fall back to any file input
-      let fileInput = page.locator('input[type="file"][accept*="image"]').first();
-      if (!(await fileInput.count().catch(() => 0))) {
-        fileInput = page.locator('input[type="file"]').first();
-      }
-      try {
-        await fileInput.setInputFiles(imageFiles);
-      } catch (e) {
-        console.warn('[LinkedIn] setInputFiles failed:', e.message);
-      }
-
-      // Wait for upload preview — LinkedIn shows the image inside the dialog within a few seconds.
-      const preview = page.locator(
-        'div[role="dialog"] img[src^="blob:"], div[role="dialog"] img[src*="media-exp"], div[role="dialog"] [data-test-id*="image-preview" i], div[role="dialog"] [class*="image-detour-view" i] img'
-      ).first();
-      await preview.waitFor({ state: 'visible', timeout: 20000 }).catch(() =>
-        console.warn('[LinkedIn] Image preview not detected, continuing')
-      );
-      await page.waitForTimeout(2000);
-
-      // Click Next/Done up to 3 times to confirm the image and return to the main composer
-      for (let i = 0; i < 3; i++) {
-        const nextBtn = page.locator(
-          'div[role="dialog"] button:has-text("Next"), div[role="dialog"] button:has-text("Done"), div[role="dialog"] button[aria-label="Next"], div[role="dialog"] button[aria-label="Done"]'
-        ).first();
-        if (await nextBtn.isVisible().catch(() => false)) {
-          const enabled = !(await nextBtn.isDisabled().catch(() => false));
-          if (!enabled) { await page.waitForTimeout(1500); continue; }
-          await nextBtn.click().catch(() => {});
-          await page.waitForTimeout(2000);
-        } else break;
-      }
+      await attachImagesToComposer(page, imageFiles);
     }
 
     // Click Post — wait for it to enable. Filter out "Post settings" / "Post to anyone" buttons.
