@@ -88,7 +88,11 @@ async function sendTelegram(botToken, chatId, message, backend) {
     console.log('[Telegram] Skipped — no local bot token configured');
     return null;
   }
-  return sendViaBotToken(botToken, normalizedChatId, { text: message });
+  return sendViaBotToken(botToken, normalizedChatId, {
+    text: message,
+    disable_web_page_preview: true,
+    link_preview_options: { is_disabled: true },
+  });
 }
 
 async function sendTelegramPhoto(botToken, chatId, photoBuffer, caption = '', backend) {
