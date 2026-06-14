@@ -212,8 +212,8 @@ export default function FolderPostScheduler() {
                   <Input type="number" min={1} value={postsPerRun} onChange={(e) => setPostsPerRun(Number(e.target.value) || 1)} className="h-8 text-xs" />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Hour {frequency === 'hourly' || frequency === 'every_6h' || frequency === 'every_12h' ? '(ignored)' : ''}</Label>
-                  <Select value={String(hour)} onValueChange={(v) => setHour(Number(v))} disabled={frequency === 'hourly' || frequency === 'every_6h' || frequency === 'every_12h'}>
+                  <Label className="text-xs">Hour {HIDE_TIME.includes(frequency) ? '(ignored)' : ''}</Label>
+                  <Select value={String(hour)} onValueChange={(v) => setHour(Number(v))} disabled={HIDE_TIME.includes(frequency)}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent className="max-h-60">
                       {Array.from({ length: 24 }, (_, i) => (
@@ -223,8 +223,8 @@ export default function FolderPostScheduler() {
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Minute</Label>
-                  <Select value={String(minute)} onValueChange={(v) => setMinute(Number(v))}>
+                  <Label className="text-xs">Minute {HIDE_MINUTE.includes(frequency) ? '(ignored)' : ''}</Label>
+                  <Select value={String(minute)} onValueChange={(v) => setMinute(Number(v))} disabled={HIDE_MINUTE.includes(frequency)}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent className="max-h-60">
                       {Array.from({ length: 60 }, (_, i) => (
