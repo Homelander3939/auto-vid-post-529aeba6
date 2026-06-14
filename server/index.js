@@ -2603,7 +2603,8 @@ async function processSocialFolderSchedules(opts = {}) {
         if (!force) {
           const [cMin, cHr, , , cDow] = String(sched.cron_expression || '0 9 * * *').split(' ');
           const prevMin = (currentMinute + 59) % 60;
-          const minMatch = cMin === '*' || parseInt(cMin) === currentMinute || parseInt(cMin) === prevMin;
+          const minMatch = cMin === '*'
+            || (cMin.startsWith('*/') ? (currentMinute % parseInt(cMin.replace('*/', '')) === 0 || prevMin % parseInt(cMin.replace('*/', '')) === 0) : (parseInt(cMin) === currentMinute || parseInt(cMin) === prevMin));
           const hrMatch = cHr === '*'
             || (cHr.startsWith('*/') ? currentHour % parseInt(cHr.replace('*/', '')) === 0 : parseInt(cHr) === currentHour);
           const dowMatch = cDow === '*' || cDow.split(',').map(Number).includes(currentDow);

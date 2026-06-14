@@ -18,7 +18,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Calendar, FolderOpen, Play, Trash2, Plus, RefreshCw } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 
-type Frequency = 'hourly' | 'every_6h' | 'every_12h' | 'daily' | 'weekly';
+type Frequency = 'every_5m' | 'every_10m' | 'hourly' | 'every_6h' | 'every_12h' | 'daily' | 'weekly';
 
 interface FolderSchedule {
   id: number;
@@ -34,10 +34,15 @@ interface FolderSchedule {
   imported_files: string[];
 }
 
+const HIDE_TIME: Frequency[] = ['every_5m', 'every_10m', 'hourly', 'every_6h', 'every_12h'];
+const HIDE_MINUTE: Frequency[] = ['every_5m', 'every_10m'];
+
 function buildCron(freq: Frequency, hour: number, minute: number): string {
   const m = String(minute);
   const h = String(hour);
   switch (freq) {
+    case 'every_5m':  return `*/5 * * * *`;
+    case 'every_10m': return `*/10 * * * *`;
     case 'hourly':    return `${m} * * * *`;
     case 'every_6h':  return `${m} */6 * * *`;
     case 'every_12h': return `${m} */12 * * *`;
@@ -49,6 +54,8 @@ function buildCron(freq: Frequency, hour: number, minute: number): string {
 function parseCron(cron: string): { freq: Frequency; hour: number; minute: number } {
   const parts = (cron || '').split(' ');
   const [mStr, hStr, , , dowStr] = parts;
+  if (mStr === '*/5') return { freq: 'every_5m', hour: 0, minute: 0 };
+  if (mStr === '*/10') return { freq: 'every_10m', hour: 0, minute: 0 };
   const minute = parseInt(mStr) || 0;
   if (hStr === '*') return { freq: 'hourly', hour: 0, minute };
   if (hStr === '*/6') return { freq: 'every_6h', hour: 0, minute };
@@ -59,6 +66,8 @@ function parseCron(cron: string): { freq: Frequency; hour: number; minute: numbe
 }
 
 const FREQ_LABELS: Record<Frequency, string> = {
+  every_5m: 'Every 5 minutes',
+  every_10m: 'Every 10 minutes',
   hourly: 'Every hour',
   every_6h: 'Every 6 hours',
   every_12h: 'Every 12 hours',
@@ -70,6 +79,8 @@ const pad = (n: number) => String(n).padStart(2, '0');
 
 function describe(cron: string): string {
   const { freq, hour, minute } = parseCron(cron);
+  if (freq === 'every_5m') return `Every 5 minutes`;
+  if (freq === 'every_10m') return `Every 10 minutes`;
   if (freq === 'hourly') return `Every hour at :${pad(minute)}`;
   if (freq === 'every_6h') return `Every 6 hours at :${pad(minute)}`;
   if (freq === 'every_12h') return `Every 12 hours at :${pad(minute)}`;
@@ -201,8 +212,8 @@ export default function FolderPostScheduler() {
                   <Input type="number" min={1} value={postsPerRun} onChange={(e) => setPostsPerRun(Number(e.target.value) || 1)} className="h-8 text-xs" />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Hour {frequency === 'hourly' || frequency === 'every_6h' || frequency === 'every_12h' ? '(ignored)' : ''}</Label>
-                  <Select value={String(hour)} onValueChange={(v) => setHour(Number(v))} disabled={frequency === 'hourly' || frequency === 'every_6h' || frequency === 'every_12h'}>
+                  <Label className="text-xs">Hour {HIDE_TIME.includes(frequency) ? '(ignored)' : ''}</Label>
+                  <Select value={String(hour)} onValueChange={(v) => setHour(Number(v))} disabled={HIDE_TIME.includes(frequency)}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent className="max-h-60">
                       {Array.from({ length: 24 }, (_, i) => (
@@ -212,8 +223,8 @@ export default function FolderPostScheduler() {
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Minute</Label>
-                  <Select value={String(minute)} onValueChange={(v) => setMinute(Number(v))}>
+                  <Label className="text-xs">Minute {HIDE_MINUTE.includes(frequency) ? '(ignored)' : ''}</Label>
+                  <Select value={String(minute)} onValueChange={(v) => setMinute(Number(v))} disabled={HIDE_MINUTE.includes(frequency)}>
                     <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent className="max-h-60">
                       {Array.from({ length: 60 }, (_, i) => (
