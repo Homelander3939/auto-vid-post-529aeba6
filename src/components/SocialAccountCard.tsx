@@ -23,10 +23,10 @@ function PasswordInput({ value, onChange, placeholder }: { value: string; onChan
   );
 }
 
-const PLATFORM_META: Record<string, { title: string; desc: string }> = {
-  x: { title: 'X (Twitter)', desc: 'X.com login — browser opens x.com/compose' },
-  linkedin: { title: 'LinkedIn', desc: 'LinkedIn.com login — browser opens linkedin.com/feed' },
-  facebook: { title: 'Facebook', desc: 'Facebook.com login — browser opens facebook.com' },
+const PLATFORM_META: Record<string, { title: string; desc: string; urlPlaceholder: string }> = {
+  x: { title: 'X (Twitter)', desc: 'X.com login — browser opens x.com/compose', urlPlaceholder: 'https://x.com/yourhandle' },
+  linkedin: { title: 'LinkedIn', desc: 'LinkedIn.com login — browser opens linkedin.com/feed', urlPlaceholder: 'https://www.linkedin.com/company/your-page/admin/' },
+  facebook: { title: 'Facebook', desc: 'Facebook.com login — browser opens facebook.com', urlPlaceholder: 'https://www.facebook.com/YourPageName' },
 };
 
 export default function SocialAccountCard({
