@@ -50,7 +50,7 @@ export default function SocialAccountCard({
   const platformAccounts = accounts.filter((a) => a.platform === platform);
   const meta = PLATFORM_META[platform] || { title: platform, desc: '' };
 
-  const resetForm = () => { setForm({ label: '', email: '', password: '' }); setAdding(false); setEditingId(null); };
+  const resetForm = () => { setForm({ label: '', email: '', password: '', target_url: '' }); setAdding(false); setEditingId(null); };
 
   const handleSave = async () => {
     if (!form.email.trim()) { toast({ title: 'Email/username is required', variant: 'destructive' }); return; }
