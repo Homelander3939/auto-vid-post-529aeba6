@@ -49,6 +49,10 @@ export interface ImportedBundle {
   warnings: string[];
 }
 
+interface SourceTaggedFile extends File {
+  __sourceMeta?: { folder: string; files: string[] };
+}
+
 interface Props {
   onLoad: (bundle: ImportedBundle) => void;
   onSendToQueue?: (bundle: ImportedBundle, mode: 'now' | 'schedule' | 'draft', scheduledAt?: string) => Promise<void>;
@@ -307,7 +311,7 @@ async function processManifest(
     images,
     texts,
     articleUrls,
-      sourceMeta: (manifestFile as any).__sourceMeta,
+      sourceMeta: (manifestFile as SourceTaggedFile).__sourceMeta,
     errors,
     warnings,
   };
@@ -501,7 +505,7 @@ export default function UploadPostImporter({ onLoad, onSendToQueue }: Props) {
       const imgs: File[] = [];
       for (const b of data.bundles || []) {
         const txt = new File([b.content], b.manifestName, { type: 'text/plain' });
-        (txt as any).__sourceMeta = b.sourceMeta;
+        (txt as SourceTaggedFile).__sourceMeta = b.sourceMeta;
         txts.push(txt);
         for (const img of b.images || []) {
           if (img.dataBase64 && img.mime) imgs.push(base64ToFile(img.name, img.mime, img.dataBase64));
