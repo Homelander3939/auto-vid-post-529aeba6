@@ -46,7 +46,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     await postBtn.click();
 
     await page.waitForTimeout(6000);
-    return { url: 'https://facebook.com/' };
+    return { url: page.url() || 'https://facebook.com/' };
   } finally {
     await safeClose(context);
   }
