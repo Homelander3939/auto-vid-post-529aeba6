@@ -52,6 +52,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
   const [aiPrompt, setAiPrompt] = useState<string | null>(null);
   const [aiSources, setAiSources] = useState<any[]>([]);
   const [platformVariants, setPlatformVariants] = useState<Record<string, { description: string; hashtags: string[] }>>({});
+  const [sourceMeta, setSourceMeta] = useState<any>(null);
   // Which platform's variant is currently shown in the preview switcher.
   const [previewPlatform, setPreviewPlatform] = useState<string>('x');
 
@@ -105,10 +106,12 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
     if (imagePreview) URL.revokeObjectURL(imagePreview);
     extraImagePreviews.forEach((u) => URL.revokeObjectURL(u));
     setAiImagePath(null);
+    setSourceMeta(null);
     setImageFile(first ? first.file : null);
     setImagePreview(first ? URL.createObjectURL(first.file) : null);
     setExtraImageFiles(rest.map((r) => r.file));
     setExtraImagePreviews(rest.map((r) => URL.createObjectURL(r.file)));
+    setSourceMeta(b.sourceMeta || null);
 
     // Auto-pick default accounts for each platform when available.
     setAccountSelections((prev) => {
@@ -185,6 +188,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       aiPrompt,
       aiSources,
       platformVariants: Object.keys(platformVariants).length ? platformVariants : undefined,
+      sourceMeta,
     });
 
     // Force draft status when saving without accounts
@@ -273,6 +277,7 @@ function ComposeTab({ accounts, onCreated }: { accounts: SocialAccount[]; onCrea
       setExtraImageFiles([]); setExtraImagePreviews([]);
       setScheduledAt(''); setAiPrompt(null); setAiSources([]);
       setPlatformVariants({});
+      setSourceMeta(null);
       onCreated();
     } catch (e: any) {
       toast({ title: 'Failed', description: e.message, variant: 'destructive' });
