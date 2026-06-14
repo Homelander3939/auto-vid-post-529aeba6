@@ -10,14 +10,11 @@ function normalizeChatId(chatId) {
 
 async function sendViaBotToken(botToken, chatId, payload) {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const body = { chat_id: chatId, ...payload };
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      parse_mode: 'HTML',
-      ...payload,
-    }),
+    body: JSON.stringify(body),
   });
 
   const data = await res.json().catch(() => ({}));
@@ -49,7 +46,6 @@ async function sendPhotoViaBotToken(botToken, chatId, photoBuffer, caption = '')
   const form = new FormData();
   form.append('chat_id', String(chatId));
   if (caption) form.append('caption', caption);
-  form.append('parse_mode', 'HTML');
   form.append('photo', new Blob([photoBuffer], { type: 'image/png' }), 'photo.png');
   const res = await globalThis.fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, { method: 'POST', body: form });
   const data = await res.json().catch(() => ({}));
@@ -111,7 +107,6 @@ async function sendTelegramPhoto(botToken, chatId, photoBuffer, caption = '', ba
     return sendViaEdgeFunction({
       chat_id: normalizedChatId,
       text: caption,
-      parse_mode: 'HTML',
       photo_base64: Buffer.from(photoBuffer).toString('base64'),
       photo_mime_type: 'image/png',
     }, backend);
