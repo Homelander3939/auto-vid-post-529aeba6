@@ -57,6 +57,33 @@ async function downloadImages(supabase, post) {
   return out;
 }
 
+function cleanupSourceFiles(sourceMeta, shouldClean) {
+  const src = sourceMeta || {};
+  if (!src.folder || !Array.isArray(src.files) || !src.files.length) return '';
+
+  if (!shouldClean) {
+    return `\n\n🧹 Source files kept for retry in ${cleanTelegramText(src.folder, 120)}`;
+  }
+
+  const removed = [];
+  const failed = [];
+  for (const name of src.files) {
+    const full = path.join(src.folder, name);
+    try {
+      if (fs.existsSync(full)) { fs.unlinkSync(full); removed.push(name); }
+    } catch (e) {
+      failed.push(`${name} (${e.message})`);
+    }
+  }
+
+  let line = removed.length
+    ? `\n\n🧹 Posted successfully and cleared ${removed.length} source file(s) from ${cleanTelegramText(src.folder, 120)}`
+    : `\n\n🧹 No source files found to clear in ${cleanTelegramText(src.folder, 120)}`;
+  if (removed.length) console.log(`[SocialPosts] Removed ${removed.length} source file(s) from ${src.folder}`);
+  if (failed.length) line += `\n⚠️ Could not delete: ${cleanTelegramText(failed.join(', '), 200)}`;
+  return line;
+}
+
 async function processSocialPost(supabase, postId, notify) {
   if (processing.has(postId)) return;
   processing.add(postId);
@@ -135,6 +162,10 @@ async function processSocialPost(supabase, postId, notify) {
       completed_at: new Date().toISOString(),
     }).eq('id', postId);
 
+    // Cleanup must not depend on Telegram delivery. If at least one platform posted,
+    // remove the source bundle so folder schedules behave like video uploads.
+    const cleanupLine = cleanupSourceFiles(post.source_meta, successCount > 0);
+
     if (notify) {
       try {
         const scheduleTag = post.scheduled_at ? ' (scheduled)' : '';
@@ -145,29 +176,6 @@ async function processSocialPost(supabase, postId, notify) {
         );
         const emoji = finalStatus === 'completed' ? '🎉' : finalStatus === 'partial' ? '⚠️' : '❌';
         const preview = cleanTelegramText(post.description || '', 120);
-
-        // Delete source files from the local folder on any success (mirrors video uploads).
-        let cleanupLine = '';
-        const src = post.source_meta;
-        if (successCount > 0 && src && src.folder && Array.isArray(src.files) && src.files.length) {
-          const removed = [];
-          const failed = [];
-          for (const name of src.files) {
-            const full = path.join(src.folder, name);
-            try {
-              if (fs.existsSync(full)) { fs.unlinkSync(full); removed.push(name); }
-            } catch (e) {
-              failed.push(`${name} (${e.message})`);
-            }
-          }
-          if (removed.length) {
-            cleanupLine = `\n\n🧹 Cleared ${removed.length} file(s) from ${cleanTelegramText(src.folder, 120)}`;
-            console.log(`[SocialPosts] Removed ${removed.length} source file(s) from ${src.folder}`);
-          }
-          if (failed.length) {
-            cleanupLine += `\n⚠️ Could not delete: ${cleanTelegramText(failed.join(', '), 200)}`;
-          }
-        }
 
         const msg = `${emoji} Social post ${finalStatus}${scheduleTag}\n${preview}\n\n${lines.join('\n\n')}${cleanupLine}`;
         console.log(`[SocialPosts] Notifying Telegram: ${finalStatus} (${results.length} platforms)`);
