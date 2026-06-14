@@ -100,6 +100,7 @@ function PlatformAccountCard({
         label: form.label.trim() || form.email.split('@')[0],
         email: form.email.trim(),
         password: form.password,
+        target_url: form.targetUrl.trim() || null,
         enabled: true,
       };
       if (platform === 'youtube') {
