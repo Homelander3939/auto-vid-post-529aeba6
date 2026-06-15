@@ -1,6 +1,68 @@
 // Facebook post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
 
+function normalizeFacebookPermalink(raw) {
+  if (!raw) return null;
+  let url;
+  try { url = new URL(raw, 'https://www.facebook.com'); } catch { return null; }
+  if (!/facebook\.com$/i.test(url.hostname.replace(/^www\./, ''))) return null;
+  url.hash = '';
+
+  const path = url.pathname;
+  const story = url.searchParams.get('story_fbid') || url.searchParams.get('fbid');
+  const owner = url.searchParams.get('id');
+  if (story && owner) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
+  if (/\/posts\//i.test(path) || /\/permalink\.php$/i.test(path) || /\/videos\//i.test(path) || /\/photo\//i.test(path) || /\/share\//i.test(path)) {
+    return `${url.origin}${url.pathname}${url.search}`;
+  }
+  return null;
+}
+
+async function resolvePostedFacebookUrl(page) {
+  const direct = normalizeFacebookPermalink(page.url());
+  if (direct) return direct;
+
+  await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await page.waitForTimeout(3500 + attempt * 1500);
+    const profileUrl = page.url();
+    const ownerMatch = profileUrl.match(/facebook\.com\/(?:profile\.php\?id=(\d+)|([A-Za-z0-9.]+))/);
+    const ownerId = ownerMatch ? (ownerMatch[1] || ownerMatch[2]) : null;
+    const permalink = await page.evaluate((owner) => {
+      const normalize = (raw) => {
+        try {
+          const u = new URL(raw, 'https://www.facebook.com');
+          const p = u.pathname;
+          const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
+          const id = u.searchParams.get('id');
+          if (story && id) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
+          if (/\/posts\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/videos\//i.test(p) || /\/photo\//i.test(p) || /\/share\//i.test(p)) {
+            return `${u.origin}${u.pathname}${u.search}`;
+          }
+        } catch {}
+        return null;
+      };
+      const articles = Array.from(document.querySelectorAll('[role="article"]'));
+      const scopes = articles.length ? articles.slice(0, 3) : [document.body];
+      for (const scope of scopes) {
+        const anchors = Array.from(scope.querySelectorAll('a[href]'));
+        for (const a of anchors) {
+          const href = a.getAttribute('href') || '';
+          if (owner && href.includes('story_fbid=') && !href.includes(`id=${owner}`)) continue;
+          if (owner && /\/posts\//.test(href) && !href.includes(`/${owner}/`)) continue;
+          const out = normalize(href);
+          if (out) return out;
+        }
+      }
+      return null;
+    }, ownerId).catch(() => null);
+    if (permalink) return permalink;
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  }
+
+  throw new Error('Facebook post was submitted, but exact post link could not be found. Leaving source files for retry.');
+}
+
 async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts = {}) {
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const context = await launchPersistent('facebook', opts);
@@ -66,8 +128,6 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       } else break;
     }
 
-    // Capture URL when navigation/post happens
-    const beforeUrl = page.url();
     const postBtn = page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
     await postBtn.waitFor({ state: 'visible', timeout: 15000 });
     // Wait for enabled
@@ -90,34 +150,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     }
     await page.waitForTimeout(3500);
 
-    // Navigate to own profile and grab the freshest permalink — avoids picking
-    // up someone else's post from the feed.
-    let postUrl = page.url();
-    try {
-      await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(4000);
-      const profileUrl = page.url();
-      const ownerMatch = profileUrl.match(/facebook\.com\/(?:profile\.php\?id=(\d+)|([A-Za-z0-9.]+))/);
-      const ownerId = ownerMatch ? (ownerMatch[1] || ownerMatch[2]) : null;
-      const permalink = await page.evaluate((owner) => {
-        const links = Array.from(document.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/videos/"]'));
-        for (const a of links) {
-          const href = a.getAttribute('href') || '';
-          if (!owner) return href;
-          if (href.includes(`/${owner}/`) || href.includes(`story_fbid=`) && href.includes(`id=${owner}`) || href.includes(`/${owner}?`)) {
-            return href;
-          }
-        }
-        // fallback to first if owner check failed
-        return links[0]?.getAttribute('href') || null;
-      }, ownerId).catch(() => null);
-      if (permalink) {
-        postUrl = permalink.startsWith('http') ? permalink : `https://www.facebook.com${permalink}`;
-      } else {
-        postUrl = profileUrl;
-      }
-    } catch {}
-    return { url: postUrl || 'https://facebook.com/' };
+    return { url: await resolvePostedFacebookUrl(page) };
   } finally {
     await safeClose(context);
   }
