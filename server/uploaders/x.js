@@ -3,31 +3,78 @@ const { launchPersistent, safeClose } = require('./social-post-base');
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 
-async function resolvePostedXUrl(page) {
-  const link = page.locator('a[href*="/status/"]').first();
-  await link.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
-  const href = await link.getAttribute('href').catch(() => null);
-  if (href) return href.startsWith('http') ? href : `https://x.com${href.startsWith('/') ? '' : '/'}${href}`;
-  return page.url();
+async function getMyHandle(page) {
+  // Try the side-nav profile link first
+  const handleFromNav = await page.evaluate(() => {
+    const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]')
+      || document.querySelector('a[aria-label="Profile"]');
+    if (!a) return null;
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/^\/([A-Za-z0-9_]{1,15})$/);
+    return m ? m[1] : null;
+  }).catch(() => null);
+  if (handleFromNav) return handleFromNav;
+  // Fallback: open the account switcher / look at any /<handle> profile link with screen name
+  const handleFromMenu = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="UserAvatar-Container-unknown"]')
+      || document.querySelector('header [data-testid^="UserAvatar-Container-"]');
+    if (!el) return null;
+    const tid = el.getAttribute('data-testid') || '';
+    const m = tid.match(/^UserAvatar-Container-(.+)$/);
+    return m && m[1] !== 'unknown' ? m[1] : null;
+  }).catch(() => null);
+  return handleFromMenu;
+}
+
+async function resolvePostedXUrl(page, handle, snippet) {
+  // 1) Direct URL after publish
+  const cur = page.url();
+  const directMatch = cur.match(/https?:\/\/(?:x|twitter)\.com\/[^/]+\/status\/\d+/);
+  if (directMatch) return directMatch[0];
+
+  if (!handle) return cur;
+
+  // 2) Navigate to own profile and read first tweet permalink
+  try {
+    await page.goto(`https://x.com/${handle}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(3500);
+    const href = await page.evaluate((h) => {
+      const links = Array.from(document.querySelectorAll(`a[href*="/${h}/status/"]`));
+      for (const a of links) {
+        const m = (a.getAttribute('href') || '').match(new RegExp(`^/${h}/status/\\d+$`));
+        if (m) return a.getAttribute('href');
+      }
+      return null;
+    }, handle).catch(() => null);
+    if (href) return `https://x.com${href}`;
+  } catch {}
+  return `https://x.com/${handle}`;
 }
 
 async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
-  // Accept either a single path (legacy) or an array (multi-image bundle).
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const context = await launchPersistent('x', opts);
   try {
     const page = context.pages()[0] || await context.newPage();
+
+    // Visit home first to read the logged-in handle reliably
+    await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+    const homeUrl = page.url();
+    if (homeUrl.includes('/login') || homeUrl.includes('/i/flow/login')) {
+      throw new Error('X requires login. Use Prepare in Settings to log in once.');
+    }
+    const myHandle = await getMyHandle(page);
+
     const targetUrl = (opts && opts.targetUrl && /^https?:\/\//i.test(opts.targetUrl)) ? opts.targetUrl : X_COMPOSE_URL;
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(3000);
 
-    // If redirected to login, surface a clear error
     const url = page.url();
     if (url.includes('/login') || url.includes('/i/flow/login')) {
       throw new Error('X requires login. Use Prepare in Settings to log in once.');
     }
 
-    // Compose textarea (X uses contenteditable)
     const textArea = page.locator('div[role="textbox"][data-testid^="tweetTextarea"]').first();
     await textArea.waitFor({ state: 'visible', timeout: 30000 });
     await textArea.click();
@@ -53,7 +100,6 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
 
     const postBtn = page.locator('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]').first();
     await postBtn.waitFor({ state: 'visible', timeout: 15000 });
-    // Wait until enabled
     for (let i = 0; i < 20; i++) {
       const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
       if (disabled !== 'true') break;
@@ -65,14 +111,21 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
     });
 
-    // Wait for navigation/toast indicating success
-    await page.waitForTimeout(clicked ? 5000 : 8000);
-    const stillComposing = await textArea.isVisible().catch(() => false);
-    const statusUrl = await resolvePostedXUrl(page);
-    if (stillComposing && !/\/status\//.test(statusUrl)) {
-      throw new Error('X did not confirm the post after clicking Post. Leaving source files for retry.');
+    // Wait for composer to disappear (real success signal)
+    const composerGone = await textArea.waitFor({ state: 'detached', timeout: 20000 })
+      .then(() => true).catch(() => false);
+    const stillVisible = !composerGone && await textArea.isVisible().catch(() => false);
+    if (stillVisible) {
+      // Detect inline error toast
+      const errToast = await page.locator('[data-testid="toast"], div[role="alert"]').first().textContent().catch(() => '');
+      throw new Error(`X did not confirm the post (composer still open${errToast ? `: ${errToast.trim()}` : ''}). Leaving source files for retry.`);
     }
-    const finalUrl = statusUrl;
+
+    await page.waitForTimeout(3000);
+    const finalUrl = await resolvePostedXUrl(page, myHandle, fullText);
+    if (!/\/status\/\d+/.test(finalUrl)) {
+      throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
+    }
     return { url: finalUrl };
   } finally {
     await safeClose(context);
