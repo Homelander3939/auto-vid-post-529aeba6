@@ -22,6 +22,19 @@ async function resolvePostedFacebookUrl(page) {
   const direct = normalizeFacebookPermalink(page.url());
   if (direct) return direct;
 
+  const confirmationLink = await page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    for (const a of anchors) {
+      const text = (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim();
+      const href = a.getAttribute('href') || '';
+      if (!/view post|see post|your post|posted/i.test(text) && !/story_fbid=|\/posts\/|\/permalink\.php|\/share\//i.test(href)) continue;
+      return href;
+    }
+    return null;
+  }).catch(() => null);
+  const fromConfirmation = normalizeFacebookPermalink(confirmationLink);
+  if (fromConfirmation) return fromConfirmation;
+
   await page.goto('https://www.facebook.com/me', { waitUntil: 'domcontentloaded', timeout: 30000 });
   for (let attempt = 0; attempt < 4; attempt++) {
     await page.waitForTimeout(3500 + attempt * 1500);
