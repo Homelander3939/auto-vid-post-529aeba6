@@ -362,12 +362,14 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     const textArea = page.locator('div[role="textbox"][data-testid^="tweetTextarea"]').first();
     await textArea.waitFor({ state: 'visible', timeout: 30000 });
 
-    const fullText = hashtags.length
-      ? `${description || ''}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
-      : (description || '');
+    const fullText = buildXPostText(description || '', hashtags);
+    if (xLength(fullText) > X_MAX_CHARS) {
+      throw new Error('X text could not be shortened under the 280 character limit. Leaving source files for retry.');
+    }
 
     await insertXText(page, textArea, fullText);
     await page.waitForTimeout(1000);
+    const postedText = await ensureXTextWithinLimit(page, textArea, fullText);
 
     if (xImageFiles.length) {
       const fileInput = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"]').first();
@@ -376,7 +378,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         await attach.click({ trial: true }).catch(() => {});
         await fileInput.setInputFiles(xImageFiles);
       });
-      await page.locator('[data-testid="attachments"] img, [data-testid="attachments"] video, img[src^="blob:"], video[src^="blob:"]').first()
+      await page.locator('[data-testid="attachments"] img, [data-testid="attachments"] video, [data-testid="attachments"] [style*="background-image"], img[src^="blob:"], video[src^="blob:"], [style*="blob:"]').first()
         .waitFor({ state: 'visible', timeout: 45000 });
       await waitForXMediaReady(page, xImageFiles.length, 120000);
     }
@@ -407,7 +409,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
     }
 
-    const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, fullText);
+    const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, postedText);
     if (!/\/status\/\d+/.test(finalUrl)) {
       throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
     }
