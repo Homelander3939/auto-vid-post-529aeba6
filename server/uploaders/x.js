@@ -107,27 +107,32 @@ async function insertXText(page, textArea, text) {
   await textArea.click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
-  await textArea.evaluate((el) => {
-    el.textContent = '';
-    el.innerHTML = '';
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    document.execCommand('delete', false);
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null }));
-  }).catch(() => {});
-  const inserted = await textArea.evaluate((el, value) => {
-    el.focus();
-    el.textContent = '';
-    el.innerHTML = '';
-    const ok = document.execCommand('insertText', false, value || '');
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return ok || Boolean((el.innerText || el.textContent || '').trim());
-  }, text).catch(() => false);
-  if (!inserted) await page.keyboard.insertText(text);
+  await page.waitForTimeout(250);
+
+  // X is React-controlled. Directly setting textContent can make text appear
+  // visually while the internal composer state remains empty, producing a
+  // media-only post. Use real keyboard insertion first so React receives the
+  // same input events a human typing/pasting would create.
+  await page.keyboard.insertText(text || '').catch(() => {});
+  await page.waitForTimeout(400);
+
+  let visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+  if (!visibleText && text) {
+    await textArea.click().catch(() => {});
+    await page.keyboard.type(text, { delay: 1 }).catch(() => {});
+    await page.waitForTimeout(400);
+    visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+  }
+  if (!visibleText && text) {
+    const inserted = await textArea.evaluate((el, value) => {
+      el.focus();
+      const ok = document.execCommand('insertText', false, value || '');
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return ok || Boolean((el.innerText || el.textContent || '').trim());
+    }, text).catch(() => false);
+    if (!inserted) throw new Error('X composer text could not be inserted. Leaving source files for retry.');
+  }
 }
 
 async function ensureXTextWithinLimit(page, textArea, desiredText) {
