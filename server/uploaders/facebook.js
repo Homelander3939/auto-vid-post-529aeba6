@@ -1025,7 +1025,10 @@ async function clickFacebookSeePostAndReadUrl(page) {
     return true;
   }).catch(() => false);
   if (!clicked) return null;
-  await page.waitForTimeout(4000);
+  await Promise.race([
+    page.waitForURL(/\/(posts|permalink\.php|story\.php|photo|share|shares?)\//i, { timeout: 10000 }),
+    page.waitForTimeout(6500),
+  ]).catch(() => {});
   return normalizeFacebookPermalink(page.url()) || normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
 }
 
