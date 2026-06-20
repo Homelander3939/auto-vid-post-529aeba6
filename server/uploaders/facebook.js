@@ -1007,6 +1007,21 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   throw new Error('Facebook post was submitted, but exact post link could not be found. Leaving source files for retry.');
 }
 
+async function verifyPostedFacebookUrlContainsText(page, url, expectedText) {
+  const expected = normalizePostText(expectedText).slice(0, 70);
+  if (!expected || !url) return true;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(3500);
+  const body = normalizePostText(await page.evaluate(() => {
+    const article = document.querySelector('[role="article"]') || document.body;
+    return (article?.innerText || article?.textContent || '').trim();
+  }).catch(() => ''));
+  if (!body.includes(expected.slice(0, Math.min(40, expected.length)))) {
+    throw new Error('Facebook published URL did not contain the intended text, so it is not treated as a successful post. Leaving source files for retry.');
+  }
+  return true;
+}
+
 async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts = {}) {
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const context = await launchPersistent('facebook', opts);
@@ -1095,6 +1110,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
         console.error('[Facebook] Link resolution diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
         throw e;
       });
+    await verifyPostedFacebookUrlContainsText(page, finalUrl, fullText);
     return { url: finalUrl };
   } finally {
     await safeClose(context);
