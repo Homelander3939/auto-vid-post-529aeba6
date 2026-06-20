@@ -15,7 +15,8 @@ function normalizeFacebookPermalink(raw) {
   const path = url.pathname.replace(/\/$/, '');
   const story = url.searchParams.get('story_fbid') || url.searchParams.get('fbid');
   const owner = url.searchParams.get('id');
-  if (story && owner) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
+  const origin = 'https://www.facebook.com';
+  if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
   if (/\/(?:posts|videos|reel|watch)\//i.test(path)
     || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(path)
     || /\/permalink\.php$/i.test(path)
@@ -29,7 +30,7 @@ function normalizeFacebookPermalink(raw) {
       if (value) keep.set(key, value);
     }
     const query = keep.toString();
-    return `${url.origin}${path}${query ? `?${query}` : ''}`;
+    return `${origin}${path}${query ? `?${query}` : ''}`;
   }
   return null;
 }
@@ -98,7 +99,8 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const p = u.pathname.replace(/\/$/, '');
         const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
         const id = u.searchParams.get('id');
-        if (story && id) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
+        const origin = 'https://www.facebook.com';
+        if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
         if (/\/(?:posts|videos|reel|watch)\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
           for (const key of ['story_fbid', 'fbid', 'id']) {
@@ -106,7 +108,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
             if (value) keep.set(key, value);
           }
           const query = keep.toString();
-          return `${u.origin}${p}${query ? `?${query}` : ''}`;
+          return `${origin}${p}${query ? `?${query}` : ''}`;
         }
       } catch {}
       return null;
