@@ -251,6 +251,53 @@ async function clickFacebookPostButton(page, dialogSel) {
   }
 }
 
+async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  const state = await page.evaluate((selector) => {
+    const root = document.querySelector(selector) || document;
+    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
+    return (textbox?.innerText || textbox?.textContent || '').trim();
+  }, dialogSel).catch(() => '');
+  const normalized = normalizePostText(state);
+  if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
+    throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
+  }
+}
+
+async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000) {
+  const deadline = Date.now() + timeout;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate((selector) => {
+      const dialog = document.querySelector(selector);
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const root = dialog || document;
+      const text = (root.innerText || root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 1000);
+      const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Posting" i], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
+      const postButtonVisible = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && /^(post|publish)$/i.test(label || body);
+      });
+      return { dialogVisible: visible(dialog), busy, postButtonVisible, text };
+    }, dialogSel).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
+    lastState = state;
+    if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
+      throw new Error(`Facebook rejected the post: ${state.text.slice(0, 260)}. Leaving source files for retry.`);
+    }
+    if (!state.dialogVisible) return true;
+    if (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || '')) return true;
+    await page.waitForTimeout(3000);
+  }
+  console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+  throw new Error(`Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes${lastState?.text ? `: ${lastState.text.slice(0, 220)}` : ''}. Leaving source files for retry.`);
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
