@@ -137,6 +137,20 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
       const activeText = normalizePostText(await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 1000 }).catch(() => ''));
       if (activeText.includes(expected)) return step > 0;
     }
+    const canAdvance = await dialog.evaluate((root) => {
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const text = (root.innerText || root.textContent || '').trim();
+      const hasMedia = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).some(visible);
+      const looksLikeMediaEditor = /edit|crop|move|photo|image|media|preview|layout|caption|next|done|continue/i.test(text);
+      const looksLikeFinalComposer = /what.*mind|create post|say something|write something/i.test(text);
+      return hasMedia || (looksLikeMediaEditor && !looksLikeFinalComposer);
+    }).catch(() => true);
+    if (!canAdvance) return step > 0;
     const buttons = dialog.locator('[role="button"], button');
     const count = await buttons.count().catch(() => 0);
     let clicked = false;
