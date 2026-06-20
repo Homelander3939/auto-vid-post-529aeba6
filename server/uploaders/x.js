@@ -351,7 +351,7 @@ async function waitForEnabledXPostButton(page, timeout = 90000) {
 }
 
 async function clickXPostButton(page) {
-  const btn = await waitForEnabledXPostButton(page);
+  const btn = await waitForEnabledXPostButton(page, 45000);
   const ariaDisabled = await btn.getAttribute('aria-disabled').catch(() => null);
   const disabled = await btn.isDisabled().catch(() => false);
   let clicked = false;
@@ -380,10 +380,6 @@ async function clickXPostButton(page) {
       await page.mouse.click(coords.x, coords.y);
       clicked = true;
     }
-  }
-  if (!clicked) {
-    const rolePost = page.getByRole('button', { name: /^Post$/ }).last();
-    clicked = await rolePost.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
   }
   if (!clicked) throw new Error('Could not click the X Post button. Leaving source files for retry.');
 }
