@@ -664,7 +664,7 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
       const postButtonVisible = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && /^(post|publish|share)$/i.test(label || body);
       });
       return { dialogVisible: visible(dialog), busy, postButtonVisible, text };
     }, { selector: dialogSel, dialogIndex: activeIndex }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
@@ -704,7 +704,7 @@ async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText 
       const postButtonVisible = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const seePostVisible = Array.from(root.querySelectorAll('a, [role="button"], button')).some((el) => visible(el) && /^(see|view) post$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()));
       return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
