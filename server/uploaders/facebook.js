@@ -192,7 +192,7 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
     await page.waitForTimeout(1500);
     if (await facebookComposerOpen(page)) return true;
     await closeFacebookNonComposerDialogs(page);
-    const menuPost = page.locator('[role="menuitem"]:has-text("Post"), [role="menuitem"]:has-text("Create post"), [role="button"]:has-text("Post")').first();
+    const menuPost = page.locator('[role="menuitem"]:has-text("Create post"), [role="menuitem"]:has-text("Post"), [role="menu"] [role="button"]:has-text("Create post")').first();
     if (await menuPost.isVisible().catch(() => false)) {
       await menuPost.click({ force: true }).catch(async () => { await menuPost.click().catch(() => {}); });
       await page.waitForTimeout(1500);
