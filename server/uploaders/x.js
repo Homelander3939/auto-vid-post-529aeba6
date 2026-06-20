@@ -1,6 +1,9 @@
 // X (Twitter) post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
-const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
+// NOTE: do NOT import overlay-dismiss here. The compose UI is a role="dialog"
+// and X's close (✕) button has a screen-reader-only "Close" span — the generic
+// overlay dismisser would click it, trigger the "Save / Discard draft" prompt,
+// and the post would end up submitted without text (only media).
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
