@@ -426,9 +426,15 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
 
 async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', baselineUrls = []) {
   const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
+  const wanted = normalizePostText(snippet).slice(0, 90);
   const fresh = (url) => {
     const normalized = normalizeFacebookPermalink(url);
     return normalized && !baselineSet.has(normalized) ? normalized : null;
+  };
+  const textMatches = (body = '') => {
+    if (!wanted) return true;
+    const normalized = normalizePostText(body);
+    return normalized.includes(wanted.slice(0, Math.min(45, wanted.length)));
   };
   const direct = normalizeFacebookPermalink(page.url());
   if (direct && !baselineSet.has(direct)) return direct;
@@ -457,8 +463,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   urlsToScan.push('https://www.facebook.com/me');
   for (const scanUrl of urlsToScan) {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await page.waitForTimeout(3000 + attempt * 1500);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await page.waitForTimeout(4000 + Math.min(attempt, 8) * 1500);
+      const candidates = await fetchRecentFacebookPostCandidates(page, scanUrl, 10, 1000).catch(() => []);
+      const matchingCandidate = candidates.find((item) => fresh(item?.url) && textMatches(item?.text || ''));
+      if (matchingCandidate) return fresh(matchingCandidate.url);
+      const anyFreshCandidate = candidates.find((item) => fresh(item?.url) && item?.fresh);
+      if (!wanted && anyFreshCandidate) return fresh(anyFreshCandidate.url);
       const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
