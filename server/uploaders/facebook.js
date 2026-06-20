@@ -347,7 +347,7 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
       if (!hasPost) return;
       const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
       if (!textOk) return;
-      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter((el) => {
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter((el) => {
         if (!visible(el)) return false;
         const r = el.getBoundingClientRect();
         return r.width > 40 && r.height > 40;
@@ -393,7 +393,7 @@ async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
       }))
       .filter((b) => /post|next|publish|share/i.test(`${b.text} ${b.label}`))
       .slice(0, 10);
-    const previews = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+    const previews = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter(visible).length;
     const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).filter(visible).length;
     const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
     return {
@@ -454,7 +454,7 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
         const s = window.getComputedStyle(el);
         return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
       };
-      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter(visible).length;
       const busy = Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
       const text = (dialog.innerText || dialog.textContent || '').slice(0, 1000);
       return { previews, busy, text };
