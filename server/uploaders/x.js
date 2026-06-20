@@ -166,8 +166,12 @@ async function getXMediaState(page) {
     const previews = Array.from(composer.querySelectorAll([
       '[data-testid="attachments"] img',
       '[data-testid="attachments"] video',
+      '[data-testid="attachments"] [aria-label*="Image" i]',
+      '[data-testid="attachments"] [aria-label*="Photo" i]',
+      '[data-testid="attachments"] [style*="background-image"]',
       'img[src^="blob:"]',
       'video[src^="blob:"]',
+      '[style*="blob:"]',
       '[role="img"][aria-label*="Image" i]',
     ].join(','))).filter(visible).length;
     const busy = Array.from(composer.querySelectorAll([
@@ -177,12 +181,13 @@ async function getXMediaState(page) {
       '[aria-label*="Processing" i]',
       '[data-testid*="progress" i]',
     ].join(','))).some(visible);
+    const text = (composer.innerText || composer.textContent || '').slice(0, 1000);
     const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
       .map((n) => (n.innerText || n.textContent || '').trim())
       .filter(Boolean)
       .join(' | ')
       .slice(0, 400);
-    return { previews, busy, problem };
+    return { previews, busy, problem: [problem, text].filter(Boolean).join(' | ').slice(0, 700) };
   }).catch(() => ({ previews: 0, busy: false, problem: '' }));
 }
 
@@ -199,7 +204,7 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
     }
     const postEnabled = await isXPostButtonEnabled(page).catch(() => false);
     const hasExpectedPreview = state.previews >= Math.min(expectedCount, X_MAX_IMAGES);
-    const readyEnough = postEnabled && !state.busy && (hasExpectedPreview || state.previews > 0);
+    const readyEnough = postEnabled && !state.busy && hasExpectedPreview;
     if (readyEnough) {
       if (!stableReadySince) stableReadySince = Date.now();
       if (Date.now() - stableReadySince >= 2500) return true;
