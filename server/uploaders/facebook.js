@@ -1483,6 +1483,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Open composer if not already open
     const dialogSel = 'div[role="dialog"]';
     const dialogOpen = async () => await facebookComposerOpen(page, dialogSel);
+    await closeFacebookNonComposerDialogs(page);
     if (!(await dialogOpen())) {
       const opened = await clickFacebookModernComposerEntry(page, imageFiles.length > 0);
       if (!opened) throw new Error('Could not open the Facebook Create Post composer. Leaving source files for retry.');
