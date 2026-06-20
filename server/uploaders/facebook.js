@@ -97,7 +97,7 @@ function extractFacebookPermalinkFromPayload(payload) {
 }
 
 async function getActiveFacebookDialogIndex(page) {
-  return await page.evaluate(() => {
+  const clickedFallback = await page.evaluate(() => {
     const visible = (el) => {
       if (!el) return false;
       const r = el.getBoundingClientRect();
@@ -215,7 +215,7 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
       const context = `${text} ${el.closest('[aria-label], section, article, div')?.getAttribute?.('aria-label') || ''}`;
       let score = 0;
       if (/create post|write something|what.*mind|say something|composer/i.test(context)) score += 100;
-      if (/create$/i.test(text)) score += 15;
+      if (/^create$/i.test(text) && !/photo|image|cover|video|media/i.test(context)) score += 15;
       // Never use global photo/media/profile/cover controls to open the composer;
       // those are what open page cover/photo editors instead of a post dialog.
       if (/cover|profile picture|avatar|photo viewer|view photo|photos?\b|video|image|media|story|reel|room|live|advertise|promote|search|comment|reply|message/i.test(context)) score -= 140;
