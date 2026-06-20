@@ -1970,8 +1970,8 @@ function scanLocalBundles(folderPath) {
         }).join('\n')
       : '';
     const texts = {};
-    if (liFb) { texts.linkedin = (liFb + tail).trim(); texts.facebook = (liFb + tail).trim(); }
-    if (xText) texts.x = xText.trim();
+    if (liFb) { texts.linkedin = stripTechPulsePrefix(liFb + tail); texts.facebook = stripTechPulsePrefix(liFb + tail); }
+    if (xText) texts.x = stripTechPulsePrefix(xText);
     // Auto-discover images by filename prefix when manifest doesn't list them.
     // Bundles like `2026-05-08-morning-post-01.txt` ↔
     // `2026-05-08-morning-post-01-story-01-*.jpg`.
