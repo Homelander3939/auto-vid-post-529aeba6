@@ -17,7 +17,8 @@ function normalizeFacebookPermalink(raw) {
   const owner = url.searchParams.get('id');
   const origin = 'https://www.facebook.com';
   if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
-  if (/\/(?:posts|videos|reel|watch)\//i.test(path)
+  if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(path)
+    || /\/[^/]+\/permalink\//i.test(path)
     || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(path)
     || /\/permalink\.php$/i.test(path)
     || /\/story\.php$/i.test(path)
@@ -161,7 +162,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const id = u.searchParams.get('id');
         const origin = 'https://www.facebook.com';
         if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
-        if (/\/(?:posts|videos|reel|watch)\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
+        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
           for (const key of ['story_fbid', 'fbid', 'id']) {
             const value = u.searchParams.get(key);
