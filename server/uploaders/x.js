@@ -397,11 +397,11 @@ async function extractXStatusUrl(page, expectedHandle = null) {
 
 function xUrlFromCreateTweetPayload(payload, fallbackHandle) {
   const create = payload?.data?.create_tweet || payload?.data?.createTweet || payload?.create_tweet;
-  const result = create?.tweet_results?.result || create?.tweet?.result || create?.tweet || null;
-  const id = result?.rest_id || result?.legacy?.id_str || result?.tweet?.rest_id || result?.tweet?.legacy?.id_str;
-  const handle = result?.core?.user_results?.result?.legacy?.screen_name
-    || result?.core?.user_results?.result?.screen_name
-    || fallbackHandle;
+  const result = create?.tweet_results?.result || create?.tweet?.result || create?.tweet || payload?.data?.tweetResult?.result || null;
+  const tweet = result?.tweet || result;
+  const id = tweet?.rest_id || tweet?.legacy?.id_str || result?.rest_id || result?.legacy?.id_str;
+  const userResult = tweet?.core?.user_results?.result || result?.core?.user_results?.result || tweet?.author?.legacy || null;
+  const handle = userResult?.legacy?.screen_name || userResult?.screen_name || tweet?.legacy?.user_screen_name || fallbackHandle;
   if (id && handle) return `https://x.com/${handle}/status/${id}`;
   return null;
 }
@@ -438,10 +438,10 @@ async function waitForCreateTweetUrl(promise, timeout = 30000) {
   ]).catch(() => null);
 }
 
-async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
+async function waitForXPublishConfirmation(page, textArea, timeout = 45000, expectedHandle = null) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const statusUrl = await extractXStatusUrl(page);
+    const statusUrl = await extractXStatusUrl(page, expectedHandle);
     if (statusUrl) return { confirmed: true, url: statusUrl };
     const stillVisible = await textArea.isVisible().catch(() => false);
     const toast = await visibleXProblemText(page);
@@ -453,14 +453,40 @@ async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
   return { confirmed: false, error: '' };
 }
 
-async function resolvePostedXUrl(page, handle, snippet) {
-  const direct = await extractXStatusUrl(page);
+async function fetchRecentXStatusUrlsFromProfile(page, handle, limit = 8, settleMs = 2500) {
+  if (!handle) return [];
+  await page.goto(`https://x.com/${handle}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  const urls = await page.evaluate(({ h, maxItems }) => {
+    const out = [];
+    const seen = new Set();
+    for (const article of Array.from(document.querySelectorAll('article'))) {
+      for (const a of Array.from(article.querySelectorAll(`a[href*="/${h}/status/"]`))) {
+        const href = a.getAttribute('href') || '';
+        const absolute = href.startsWith('http') ? href : `https://x.com${href}`;
+        const m = absolute.match(new RegExp(`https?://(?:x|twitter)\\.com/${h}/status/\\d+`, 'i'));
+        if (!m || seen.has(m[0])) continue;
+        seen.add(m[0]);
+        out.push(m[0].replace(/^https?:\/\/twitter\.com/i, 'https://x.com'));
+        if (out.length >= maxItems) return out;
+      }
+    }
+    return out;
+  }, { h: handle, maxItems: limit }).catch(() => []);
+  return (Array.isArray(urls) ? urls : []).map((url) => normalizeXStatusUrl(url, handle)).filter(Boolean);
+}
+
+async function resolvePostedXUrl(page, handle, snippet, baselineUrls = []) {
+  const direct = await extractXStatusUrl(page, handle);
   if (direct) return direct;
-  if (!handle) return page.url();
+  if (!handle) return null;
+
+  const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : [])
+    .map((url) => normalizeXStatusUrl(url, handle)).filter(Boolean));
 
   try {
-    await page.goto(`https://x.com/${handle}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     for (let attempt = 0; attempt < 8; attempt++) {
+      await page.goto(`https://x.com/${handle}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(2500 + attempt * 1000);
       const href = await page.evaluate(({ h, text }) => {
         const norm = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/\s+/g, ' ').trim();
@@ -482,11 +508,12 @@ async function resolvePostedXUrl(page, handle, snippet) {
         }
         return null;
       }, { h: handle, text: snippet || '' }).catch(() => null);
-      if (href) return href;
+      const normalized = normalizeXStatusUrl(href, handle);
+      if (normalized && !baselineSet.has(normalized)) return normalized;
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     }
   } catch {}
-  return `https://x.com/${handle}`;
+  return null;
 }
 
 async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
