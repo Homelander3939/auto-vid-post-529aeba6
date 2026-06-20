@@ -64,6 +64,20 @@ function handleFromXUrl(raw) {
   }
 }
 
+function normalizeXStatusUrl(raw, expectedHandle = null) {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw, 'https://x.com');
+    if (!/(^|\.)(x|twitter)\.com$/i.test(url.hostname)) return null;
+    const m = url.pathname.match(/^\/([A-Za-z0-9_]{1,15})\/status\/(\d+)/i);
+    if (!m) return null;
+    if (expectedHandle && m[1].toLowerCase() !== String(expectedHandle).toLowerCase()) return null;
+    return `https://x.com/${m[1]}/status/${m[2]}`;
+  } catch {
+    return null;
+  }
+}
+
 async function getMyHandle(page) {
   const handleFromNav = await page.evaluate(() => {
     const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]')
@@ -135,6 +149,7 @@ async function ensureXTextWithinLimit(page, textArea, desiredText) {
 
 async function getXPostButton(page) {
   const locatorGroups = [
+    page.locator('[role="dialog"] [role="button"]:has-text("Post"), [role="dialog"] button:has-text("Post")'),
     page.locator('[role="dialog"] [data-testid="tweetButton"], [role="dialog"] [aria-label="Post"][role="button"]'),
     page.locator('[data-testid="primaryColumn"] [data-testid="tweetButtonInline"], [data-testid="primaryColumn"] [data-testid="tweetButton"], [data-testid="primaryColumn"] [aria-label="Post"][role="button"]'),
     page.locator('main [data-testid="tweetButtonInline"], main [data-testid="tweetButton"], main [aria-label="Post"][role="button"]'),
@@ -158,6 +173,49 @@ async function getXPostButton(page) {
     }
   }
   return fallback || page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]').last();
+}
+
+async function findXPostButtonCoords(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0' && s.pointerEvents !== 'none';
+    };
+    const clickTarget = (el) => el.closest('button, [role="button"], [tabindex]') || el;
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+    const scope = dialogs.length ? dialogs[dialogs.length - 1] : (document.querySelector('main') || document.body);
+    const nodes = Array.from(scope.querySelectorAll('button, [role="button"], [tabindex], span, div'));
+    const seen = new Set();
+    const candidates = [];
+    for (const node of nodes) {
+      const rawText = (node.innerText || node.textContent || '').trim().replace(/\s+/g, ' ');
+      const label = (node.getAttribute('aria-label') || '').trim();
+      if (!/^post$/i.test(rawText) && !/^post$/i.test(label)) continue;
+      const target = clickTarget(node);
+      if (!scope.contains(target) || seen.has(target) || !visible(target)) continue;
+      seen.add(target);
+      if (target.getAttribute('aria-disabled') === 'true' || target.hasAttribute('disabled')) continue;
+      const rect = target.getBoundingClientRect();
+      const x = Math.max(rect.left + 2, Math.min(rect.right - 2, rect.left + rect.width / 2));
+      const y = Math.max(rect.top + 2, Math.min(rect.bottom - 2, rect.top + rect.height / 2));
+      const topEl = document.elementFromPoint(x, y);
+      if (topEl && !(target === topEl || target.contains(topEl) || topEl.contains(target))) continue;
+      candidates.push({ x, y, right: rect.right, bottom: rect.bottom, text: rawText, label });
+    }
+    candidates.sort((a, b) => (b.bottom - a.bottom) || (b.right - a.right));
+    return candidates[0] || null;
+  }).catch(() => null);
+}
+
+async function waitForXPostButtonCoords(page, timeout = 45000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const coords = await findXPostButtonCoords(page);
+    if (coords) return coords;
+    await page.waitForTimeout(500);
+  }
+  return null;
 }
 
 async function isXPostButtonEnabled(page) {
