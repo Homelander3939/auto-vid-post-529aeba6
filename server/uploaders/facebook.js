@@ -513,6 +513,33 @@ async function clickFacebookPostButton(page, dialogSel) {
   }
 }
 
+async function clickFacebookVerifiedPostButton(page, dialogSel, expectedText, expectedMediaCount = 0) {
+  const readyIndex = await getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount);
+  if (readyIndex < 0) {
+    console.error('[Facebook] Ready composer diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook final composer did not contain both text and media before posting. Leaving source files for retry.');
+  }
+  const dialog = page.locator('div[role="dialog"]').nth(readyIndex);
+  const postBtn = await getFacebookPostButtonInDialog(page, dialog, dialogSel);
+  await postBtn.waitFor({ state: 'visible', timeout: 20000 });
+  for (let i = 0; i < 45; i++) {
+    const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+    if (disabled !== 'true') break;
+    await page.waitForTimeout(500);
+  }
+  if ((await postBtn.getAttribute('aria-disabled').catch(() => null)) === 'true') {
+    console.error('[Facebook] Disabled verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
+  }
+  await postBtn.scrollIntoViewIfNeeded().catch(() => {});
+  let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) {
+    console.error('[Facebook] Click verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Could not click the verified Facebook Post button. Leaving source files for retry.');
+  }
+}
+
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
   const exists = await facebookTextExistsInComposer(page, expectedText);
