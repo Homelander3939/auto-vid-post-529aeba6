@@ -701,16 +701,18 @@ async function attachImagesToFacebookComposer(page, imageFiles, dialogSel, expec
   if (!imageFiles.length) return;
   const expectedCount = imageFiles.length;
   let attached = false;
-  const directInputs = [
-    page.locator(`${dialogSel} input[type="file"][accept*="image"]`).last(),
-    page.locator(`${dialogSel} input[type="file"]`).last(),
-    page.locator('input[type="file"][accept*="image"]').last(),
-    page.locator('input[type="file"]').last(),
-  ];
-  for (const input of directInputs) {
-    if (!(await input.count().catch(() => 0))) continue;
-    attached = await input.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false);
-    if (attached) break;
+  const composerIndex = await getFacebookComposerDialogIndex(page);
+  const directInputHandle = await page.evaluateHandle((dialogIndex) => {
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const root = dialogIndex >= 0 ? dialogs[dialogIndex] : dialogs[dialogs.length - 1];
+    if (!root) return null;
+    const inputs = Array.from(root.querySelectorAll('input[type="file"]'))
+      .filter((el) => !el.disabled && /image|photo|video|media|^$/i.test(el.getAttribute('accept') || ''));
+    return inputs[inputs.length - 1] || null;
+  }, composerIndex).catch(() => null);
+  const directInput = directInputHandle ? directInputHandle.asElement() : null;
+  if (directInput) {
+    attached = await directInput.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false);
   }
 
   if (!attached) {
@@ -725,8 +727,16 @@ async function attachImagesToFacebookComposer(page, imageFiles, dialogSel, expec
       attached = true;
     } else {
       await page.waitForTimeout(1000);
-      const input = page.locator('input[type="file"][accept*="image"], input[type="file"]').last();
-      attached = await input.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false);
+      const activeIndex = await getFacebookComposerDialogIndex(page);
+      const inputHandle = await page.evaluateHandle((dialogIndex) => {
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        const root = dialogIndex >= 0 ? dialogs[dialogIndex] : dialogs[dialogs.length - 1];
+        if (!root) return null;
+        const inputs = Array.from(root.querySelectorAll('input[type="file"]')).filter((el) => !el.disabled);
+        return inputs[inputs.length - 1] || null;
+      }, activeIndex).catch(() => null);
+      const input = inputHandle ? inputHandle.asElement() : null;
+      attached = input ? await input.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false) : false;
     }
   }
 
