@@ -151,6 +151,34 @@ async function facebookComposerOpen(page, dialogSel = 'div[role="dialog"]') {
   }, dialogSel).catch(() => false);
 }
 
+async function closeFacebookNonComposerDialogs(page) {
+  const closed = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+    for (let i = dialogs.length - 1; i >= 0; i--) {
+      const dialog = dialogs[i];
+      const text = (dialog.innerText || dialog.textContent || '').trim();
+      const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(text);
+      const looksLikeWrongPhotoDialog = /cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(text);
+      if (!looksLikeWrongPhotoDialog || looksLikeComposer) continue;
+      const close = Array.from(dialog.querySelectorAll('[aria-label="Close"], [aria-label="Close dialog"], [role="button"], button'))
+        .find((el) => visible(el) && /^(close|×|x)$/i.test((el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim()));
+      if (close) {
+        close.click();
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+  if (closed) await page.waitForTimeout(900);
+  return closed;
+}
+
 async function clickFacebookModernComposerEntry(page, needsMedia = false) {
   const locators = [
     page.locator('main [role="button"]:has-text("on your mind"), main [aria-label*="What" i]:has-text("mind")').first(),
@@ -163,6 +191,7 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
     await entry.click({ force: true, timeout: 8000 }).catch(async () => { await entry.click({ timeout: 8000 }).catch(() => {}); });
     await page.waitForTimeout(1500);
     if (await facebookComposerOpen(page)) return true;
+    await closeFacebookNonComposerDialogs(page);
     const menuPost = page.locator('[role="menuitem"]:has-text("Post"), [role="menuitem"]:has-text("Create post"), [role="button"]:has-text("Post")').first();
     if (await menuPost.isVisible().catch(() => false)) {
       await menuPost.click({ force: true }).catch(async () => { await menuPost.click().catch(() => {}); });
