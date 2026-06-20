@@ -178,9 +178,9 @@ function buildPlatformTexts(
       }).join('\n')
     : '';
 
-  const liFinal = (liPost || liFb || fallbackBody || '').trim();
-  const fbFinal = (fbPost || liFb || fallbackBody || '').trim();
-  const xFinal = (xPost || xLegacy || fallbackXBody || fallbackBody || '').trim();
+  const liFinal = stripTechPulsePrefix((liPost || liFb || fallbackBody || '').trim());
+  const fbFinal = stripTechPulsePrefix((fbPost || liFb || fallbackBody || '').trim());
+  const xFinal = stripTechPulsePrefix((xPost || xLegacy || fallbackXBody || fallbackBody || '').trim());
   const hasExplicitX = !!(xPost || xLegacy);
   const hasExplicitLi = !!(liPost || liFb);
   const hasExplicitFb = !!(fbPost || liFb);
