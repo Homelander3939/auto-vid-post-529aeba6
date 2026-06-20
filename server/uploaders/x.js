@@ -288,6 +288,34 @@ async function visibleXProblemText(page) {
   }).catch(() => '');
 }
 
+async function getXDiagnostics(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+    };
+    const buttons = Array.from(document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"], button, div[role="button"]'))
+      .filter(visible)
+      .map((el) => ({
+        text: (el.innerText || el.textContent || '').trim().slice(0, 40),
+        label: (el.getAttribute('aria-label') || '').slice(0, 80),
+        testid: el.getAttribute('data-testid') || '',
+        disabled: el.getAttribute('aria-disabled') || '',
+      }))
+      .filter((b) => /post/i.test(`${b.text} ${b.label} ${b.testid}`))
+      .slice(0, 8);
+    const composer = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]')?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
+    const previews = Array.from(composer.querySelectorAll('[data-testid="attachments"] img, [data-testid="attachments"] video, img[src^="blob:"], video[src^="blob:"], [style*="blob:"]')).filter(visible).length;
+    const busy = Array.from(composer.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i], [data-testid*="progress" i]')).filter(visible).length;
+    const textbox = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+    const text = (textbox?.innerText || textbox?.textContent || '').trim().slice(0, 180);
+    const message = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+      .map((n) => (n.innerText || n.textContent || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
+    return { url: location.href, text, previews, busy, buttons, message };
+  }).catch((e) => ({ error: e.message }));
+}
+
 async function extractXStatusUrl(page) {
   const directMatch = page.url().match(/https?:\/\/(?:x|twitter)\.com\/[^/]+\/status\/\d+/);
   if (directMatch) return directMatch[0].replace(/^https?:\/\/twitter\.com/i, 'https://x.com');
@@ -337,6 +365,13 @@ function waitForXCreateTweetResponse(page, fallbackHandle, timeout = 90000) {
     };
     page.on('response', onResponse);
   });
+}
+
+async function waitForCreateTweetUrl(promise, timeout = 30000) {
+  return await Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), timeout)),
+  ]).catch(() => null);
 }
 
 async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
