@@ -44,6 +44,47 @@ function normalizePostText(value) {
     .trim();
 }
 
+function extractFacebookPermalinkFromText(raw) {
+  const text = String(raw || '');
+  const candidates = [];
+  for (const match of text.matchAll(/https?:\\?\/\\?\/(?:www\.|web\.|m\.)?(?:facebook|fb)\.com[^\s"'<>\\)]+/gi)) {
+    candidates.push(match[0].replace(/\\\//g, '/').replace(/\\u0025/g, '%'));
+  }
+  for (const encoded of text.matchAll(/https?%3A%2F%2F(?:www\.|web\.|m\.)?(?:facebook|fb)\.com[^\s"'<>\\)]+/gi)) {
+    try { candidates.push(decodeURIComponent(encoded[0])); } catch {}
+  }
+  for (const candidate of candidates) {
+    const normalized = normalizeFacebookPermalink(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout = 120000) {
+  if (!expectedCount) return;
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate((selector) => {
+      const dialog = document.querySelector(selector) || document;
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+      const busy = Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
+      const text = (dialog.innerText || dialog.textContent || '').slice(0, 1000);
+      return { previews, busy, text };
+    }, dialogSel).catch(() => ({ previews: 0, busy: false, text: '' }));
+    if (/couldn't upload|could not upload|failed to upload|unsupported|try again/i.test(state.text || '')) {
+      throw new Error(`Facebook rejected the media: ${state.text}. Leaving source files for retry.`);
+    }
+    if (!state.busy && (state.previews >= expectedCount || state.previews > 0)) return;
+    await page.waitForTimeout(750);
+  }
+  throw new Error('Facebook media upload did not finish. Leaving source files for retry.');
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
@@ -138,12 +179,6 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
   const direct = normalizeFacebookPermalink(page.url());
   if (direct) return direct;
 
-  await page.waitForTimeout(2500);
-  const copied = await copyFacebookLinkFromTopArticle(page, snippet);
-  if (copied) return copied;
-  const onCurrentPage = await extractFacebookPermalinkFromArticles(page, snippet);
-  if (onCurrentPage) return onCurrentPage;
-
   const confirmationLink = await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('a[href]'));
     for (const a of anchors) {
@@ -156,6 +191,12 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
   }).catch(() => null);
   const fromConfirmation = normalizeFacebookPermalink(confirmationLink);
   if (fromConfirmation) return fromConfirmation;
+
+  await page.waitForTimeout(2500);
+  const copied = await copyFacebookLinkFromTopArticle(page, snippet);
+  if (copied) return copied;
+  const onCurrentPage = await extractFacebookPermalinkFromArticles(page, snippet);
+  if (onCurrentPage) return onCurrentPage;
 
   const urlsToScan = [];
   if (targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)) urlsToScan.push(targetUrl);
