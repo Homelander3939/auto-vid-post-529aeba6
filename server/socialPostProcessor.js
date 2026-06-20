@@ -79,7 +79,7 @@ function cleanupSourceFiles(sourceMeta, shouldClean) {
   const folder = normalizeLocalFolderPath(src.folder);
 
   if (!shouldClean) {
-    return `\n\n🧹 Source files kept in ${cleanTelegramText(folder || src.folder, 120)} because not every selected platform confirmed successfully.`;
+    return `\n\n🧹 Source files kept in ${cleanTelegramText(folder || src.folder, 120)} because no selected platform confirmed successfully.`;
   }
 
   const names = new Set(src.files.map((name) => path.basename(String(name || ''))).filter(Boolean));
@@ -270,9 +270,10 @@ async function processSocialPost(supabase, postId, notify) {
     // Cleanup must not depend on Telegram delivery. If at least one platform posted,
     // remove the source bundle so folder schedules behave like video uploads.
     const cleanupMeta = post.source_meta || await inferSourceMeta(supabase, post);
-    // Only clear source files after every selected platform is confirmed. In a
-    // partial run, keeping them lets failed platforms (like X) be retried.
-    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0 && errorCount === 0);
+    // Once any platform has a confirmed post URL, remove the local source bundle
+    // so the folder/importer cannot repost it. Failed platforms can still be
+    // retried from the stored social_posts image paths.
+    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0);
 
     if (notify) {
       try {
