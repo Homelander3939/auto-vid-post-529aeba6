@@ -533,6 +533,9 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     }
     const configuredHandle = handleFromXUrl(opts?.targetUrl);
     const myHandle = configuredHandle || await getMyHandle(page);
+    const baselineProfileStatusUrls = myHandle
+      ? await fetchRecentXStatusUrlsFromProfile(page, myHandle, 8, 1500).catch(() => [])
+      : [];
 
     // Always use the real composer URL. A configured account URL is a profile
     // reference for resolving the final link, not a place where posts can be made.
@@ -574,7 +577,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       await dismissOverlayBlockingFlow(page, { logPrefix: '[X]', clickBackground: false }).catch(() => {});
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
-      let result = await waitForXPublishConfirmation(page, textArea, 22000);
+      let result = await waitForXPublishConfirmation(page, textArea, 22000, myHandle);
       const responseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
       confirmed = result.confirmed;
       publishedUrl = responseUrl || result.url || publishedUrl;
@@ -582,7 +585,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       if (!confirmed) {
         await textArea.click().catch(() => {});
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
-        result = await waitForXPublishConfirmation(page, textArea, 15000);
+        result = await waitForXPublishConfirmation(page, textArea, 15000, myHandle);
         const shortcutResponseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
         confirmed = result.confirmed;
         publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
@@ -597,10 +600,11 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
     }
 
-    const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, postedText);
-    if (!/\/status\/\d+/.test(finalUrl)) {
+    const finalUrl = normalizeXStatusUrl(publishedUrl, myHandle)
+      || await resolvePostedXUrl(page, myHandle, postedText, baselineProfileStatusUrls);
+    if (!finalUrl || !/\/status\/\d+/.test(finalUrl)) {
       console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
-      throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
+      throw new Error('X post was submitted, but a new exact profile status URL could not be verified. Leaving source files for retry.');
     }
     return { url: finalUrl };
   } finally {
