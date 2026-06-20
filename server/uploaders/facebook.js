@@ -97,7 +97,7 @@ function extractFacebookPermalinkFromPayload(payload) {
 }
 
 async function getActiveFacebookDialogIndex(page) {
-  const clickedFallback = await page.evaluate(() => {
+  return await page.evaluate(() => {
     const visible = (el) => {
       if (!el) return false;
       const r = el.getBoundingClientRect();
@@ -107,11 +107,12 @@ async function getActiveFacebookDialogIndex(page) {
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
     const candidates = dialogs
       .map((el, index) => {
-        const z = Number.parseInt(window.getComputedStyle(el).zIndex || '0', 10);
+        const style = window.getComputedStyle(el);
+        const z = Number.parseInt(style.zIndex || '0', 10);
         const r = el.getBoundingClientRect();
-        return { index, z: Number.isFinite(z) ? z : 0, top: r.top, left: r.left };
+        return { index, z: Number.isFinite(z) ? z : 0, top: r.top, left: r.left, pointerEvents: style.pointerEvents };
       })
-      .filter((item) => visible(dialogs[item.index]));
+      .filter((item) => visible(dialogs[item.index]) && item.pointerEvents !== 'none');
     if (!candidates.length) return -1;
     candidates.sort((a, b) => (a.z - b.z) || (a.index - b.index) || (a.top - b.top) || (a.left - b.left));
     return candidates[candidates.length - 1].index;
