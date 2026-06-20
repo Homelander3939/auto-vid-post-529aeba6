@@ -127,10 +127,17 @@ async function getActiveFacebookDialogLocator(page) {
   return dialogs.nth(safeIndex);
 }
 
-async function clickFacebookNextSteps(page, maxSteps = 4) {
+async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
-    const buttons = dialog.locator('[aria-label="Next"][role="button"], div[role="button"]:has-text("Next")');
+    const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish")').first().isVisible().catch(() => false);
+    if (postVisible) return step > 0;
+    const expected = normalizePostText(expectedText).slice(0, 45);
+    if (expected) {
+      const activeText = normalizePostText(await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 1000 }).catch(() => ''));
+      if (activeText.includes(expected)) return step > 0;
+    }
+    const buttons = dialog.locator('[role="button"], button');
     const count = await buttons.count().catch(() => 0);
     let clicked = false;
     for (let i = count - 1; i >= 0; i--) {
@@ -138,6 +145,10 @@ async function clickFacebookNextSteps(page, maxSteps = 4) {
       if (!(await btn.isVisible().catch(() => false))) continue;
       const disabled = await btn.getAttribute('aria-disabled').catch(() => null);
       if (disabled === 'true') continue;
+      const label = (await btn.getAttribute('aria-label').catch(() => '') || '').trim();
+      const body = (await btn.innerText().catch(() => '') || '').trim();
+      const name = label || body;
+      if (!/^(next|done|continue)$/i.test(name)) continue;
       await btn.scrollIntoViewIfNeeded().catch(() => {});
       clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
       if (!clicked) clicked = await btn.click({ force: true, timeout: 8000 }).then(() => true).catch(() => false);
@@ -151,8 +162,7 @@ async function clickFacebookNextSteps(page, maxSteps = 4) {
 
 async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing = false } = {}) {
   const expected = normalizePostText(fullText).slice(0, 90);
-  const dialog = await getFacebookComposerDialogLocator(page);
-  const textbox = dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+  const textbox = await getFacebookTextComposerLocator(page);
   await textbox.waitFor({ state: 'visible', timeout: 20000 });
   const current = await textbox.innerText({ timeout: 3000 }).catch(() => '');
   const normalizedCurrent = normalizePostText(current);
@@ -166,6 +176,26 @@ async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMiss
     });
   }
   await page.waitForTimeout(900);
+  const written = await facebookTextExistsInComposer(page, fullText);
+  if (expected && !written) {
+    const inserted = await textbox.evaluate((el, value) => {
+      el.focus();
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('delete', false, null);
+      const ok = document.execCommand('insertText', false, value || '');
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return ok || Boolean((el.innerText || el.textContent || '').trim());
+    }, fullText).catch(() => false);
+    await page.waitForTimeout(600);
+    if (!inserted || !(await facebookTextExistsInComposer(page, fullText))) {
+      throw new Error('Facebook composer text could not be inserted. Leaving source files for retry.');
+    }
+  }
 }
 
 async function getFacebookComposerDialogIndex(page) {
@@ -200,6 +230,118 @@ async function getFacebookComposerDialogLocator(page) {
   const composerIndex = await getFacebookComposerDialogIndex(page);
   if (composerIndex >= 0 && composerIndex < count) return dialogs.nth(composerIndex);
   return getActiveFacebookDialogLocator(page);
+}
+
+async function getFacebookTextComposerLocator(page) {
+  const picked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 18 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = [];
+    dialogs.forEach((dialog, dialogIndex) => {
+      if (!visible(dialog)) return;
+      const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+      const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+      const hasPost = buttons.some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]'));
+      textboxes.forEach((textbox, textboxIndex) => {
+        if (!visible(textbox)) return;
+        const label = `${textbox.getAttribute('aria-label') || ''} ${textbox.getAttribute('aria-placeholder') || ''} ${textbox.getAttribute('placeholder') || ''}`;
+        const combined = `${label} ${dialogText}`;
+        if (/search|comment|reply|message/i.test(label)) return;
+        const rect = textbox.getBoundingClientRect();
+        let score = 0;
+        if (hasPost) score += 80;
+        if (/what.*mind|say something|write something|create post|post text|caption/i.test(combined)) score += 35;
+        if (rect.width > 240) score += 15;
+        if (rect.height > 35) score += 10;
+        if (/add a caption|media|edit photo|crop|move/i.test(combined) && !hasPost) score -= 50;
+        candidates.push({ dialogIndex, textboxIndex, score, z: Number.isFinite(z) ? z : 0 });
+      });
+    });
+    candidates.sort((a, b) => (a.score - b.score) || (a.z - b.z) || (a.dialogIndex - b.dialogIndex) || (a.textboxIndex - b.textboxIndex));
+    return candidates[candidates.length - 1] || null;
+  }).catch(() => null);
+
+  if (picked) {
+    return page.locator('div[role="dialog"]').nth(picked.dialogIndex).locator('div[role="textbox"][contenteditable="true"]').nth(picked.textboxIndex);
+  }
+  const dialog = await getFacebookComposerDialogLocator(page);
+  return dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+}
+
+async function facebookTextExistsInComposer(page, expectedText) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  if (!expected) return true;
+  const wanted = expected.slice(0, Math.min(45, expected.length));
+  return await page.evaluate((needle) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 18 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+    for (const dialog of dialogs) {
+      const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && /^(post|publish)$/i.test(label || body);
+      });
+      for (const textbox of Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible)) {
+        const text = normalize(textbox.innerText || textbox.textContent || '');
+        if (text.includes(needle) && (hasPost || textbox.getBoundingClientRect().width > 200)) return true;
+      }
+    }
+    return false;
+  }, wanted).catch(() => false);
+}
+
+async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount = 0) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  const wanted = expected.slice(0, Math.min(45, expected.length));
+  return await page.evaluate(({ needle, mediaCount }) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = [];
+    dialogs.forEach((dialog, index) => {
+      if (!visible(dialog)) return;
+      const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      if (!hasPost) return;
+      const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
+      if (!textOk) return;
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter((el) => {
+        if (!visible(el)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 40 && r.height > 40;
+      }).length;
+      if (mediaCount > 0 && previews < 1) return;
+      const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+      candidates.push({ index, previews, z: Number.isFinite(z) ? z : 0 });
+    });
+    candidates.sort((a, b) => (a.z - b.z) || (a.index - b.index) || (a.previews - b.previews));
+    return candidates.length ? candidates[candidates.length - 1].index : -1;
+  }, { needle: wanted, mediaCount: expectedMediaCount }).catch(() => -1);
 }
 
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
@@ -297,12 +439,16 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
 
 async function getFacebookPostButton(page, dialogSel) {
   const activeDialog = await getFacebookComposerDialogLocator(page);
+  return getFacebookPostButtonInDialog(page, activeDialog, dialogSel);
+}
+
+async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel, { allowGlobalFallback = true } = {}) {
   const groups = [
     activeDialog.locator('[aria-label="Post"][role="button"]'),
     activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
     activeDialog.locator('[aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")'),
-    page.getByRole('button', { name: /^Post$/ }),
   ];
+  if (allowGlobalFallback) groups.push(page.getByRole('button', { name: /^Post$/ }));
   let fallback = null;
   for (const buttons of groups) {
     const count = await buttons.count().catch(() => 0);
@@ -318,7 +464,10 @@ async function getFacebookPostButton(page, dialogSel) {
       fallback = fallback || btn;
     }
   }
-  return fallback || page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
+  if (fallback) return fallback;
+  return allowGlobalFallback
+    ? page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last()
+    : activeDialog.locator('[aria-label="Post"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), [aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")').last();
 }
 
 async function clickFacebookPostButton(page, dialogSel) {
@@ -372,12 +521,37 @@ async function clickFacebookPostButton(page, dialogSel) {
   }
 }
 
+async function clickFacebookVerifiedPostButton(page, dialogSel, expectedText, expectedMediaCount = 0) {
+  const readyIndex = await getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount);
+  if (readyIndex < 0) {
+    console.error('[Facebook] Ready composer diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook final composer did not contain both text and media before posting. Leaving source files for retry.');
+  }
+  const dialog = page.locator('div[role="dialog"]').nth(readyIndex);
+  const postBtn = await getFacebookPostButtonInDialog(page, dialog, dialogSel, { allowGlobalFallback: false });
+  await postBtn.waitFor({ state: 'visible', timeout: 20000 });
+  for (let i = 0; i < 45; i++) {
+    const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+    if (disabled !== 'true') break;
+    await page.waitForTimeout(500);
+  }
+  if ((await postBtn.getAttribute('aria-disabled').catch(() => null)) === 'true') {
+    console.error('[Facebook] Disabled verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
+  }
+  await postBtn.scrollIntoViewIfNeeded().catch(() => {});
+  let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) {
+    console.error('[Facebook] Click verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Could not click the verified Facebook Post button. Leaving source files for retry.');
+  }
+}
+
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
-  const dialog = await getFacebookComposerDialogLocator(page);
-  const state = await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 5000 }).catch(() => '');
-  const normalized = normalizePostText(state);
-  if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
+  const exists = await facebookTextExistsInComposer(page, expectedText);
+  if (expected && !exists) {
     throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
   }
 }
@@ -398,7 +572,7 @@ async function verifyFacebookComposerHasMedia(page, expectedCount) {
   }
 }
 
-async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
+async function attachImagesToFacebookComposer(page, imageFiles, dialogSel, expectedText = '') {
   if (!imageFiles.length) return;
   const expectedCount = imageFiles.length;
   let attached = false;
@@ -433,8 +607,9 @@ async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
 
   if (!attached) throw new Error('Facebook image picker opened but no controllable file input was found. Leaving source files for retry.');
   await waitForFacebookMediaReady(page, dialogSel, expectedCount, 180000);
-  await clickFacebookNextSteps(page, 5);
+  await clickFacebookNextSteps(page, 5, expectedText);
   await page.waitForTimeout(1500);
+  await waitForFacebookMediaReady(page, dialogSel, expectedCount, 60000);
 }
 
 async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000) {
@@ -789,22 +964,24 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(2000);
     }
 
-    if (imageFiles.length) {
-      await attachImagesToFacebookComposer(page, imageFiles, dialogSel);
-    }
-
+    // Facebook can open a media editor between upload and the final composer.
+    // Put text into the real composer first, then verify/reinsert after media is
+    // confirmed so we never advance to an image-only Post dialog.
     await insertFacebookTextIntoActiveComposer(page, fullText);
     await page.waitForTimeout(400);
 
-    // Some Facebook media flows open a temporary editor over the real composer.
-    // After media is attached/confirmed, write text only into the dialog that has
-    // the final Post button so suggestions/edit overlays cannot steal the post.
+    if (imageFiles.length) {
+      await attachImagesToFacebookComposer(page, imageFiles, dialogSel, fullText);
+    }
+
+    // Some Facebook media flows clear/hide text after the media editor closes.
+    // Re-write only if missing, then verify both text and media before Post.
     await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await verifyFacebookComposerHasText(page, dialogSel, fullText);
     await verifyFacebookComposerHasMedia(page, imageFiles.length);
-    await clickFacebookPostButton(page, dialogSel);
+    await clickFacebookVerifiedPostButton(page, dialogSel, fullText, imageFiles.length);
 
     // Wait for the composer/spinner to fully finish. Facebook Page posts can
     // keep rolling for several minutes; do not close or resolve early.
