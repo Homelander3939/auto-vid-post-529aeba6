@@ -509,7 +509,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
       const body = normalizeText(article.innerText || article.textContent || '');
       const fresh = /\b(just now|\d+\s*(m|min|mins|minute|minutes)|now)\b/i.test(article.innerText || '');
       const textMatch = wanted && body.includes(wanted.slice(0, Math.min(35, wanted.length)));
-      return { article, score: (textMatch ? 20 : 0) + (fresh ? 8 : 0) - index };
+      return { article, score: (textMatch ? 20 : 0) + (fresh ? 15 : 0) - index };
     }).sort((a, b) => b.score - a.score);
 
     for (const { article } of scored) {
@@ -812,7 +812,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(8000);
     const responsePermalink = await Promise.race([
       createPostPromise,
       page.waitForTimeout(45000).then(() => null),
