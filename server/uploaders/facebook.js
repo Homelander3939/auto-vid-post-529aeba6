@@ -531,7 +531,7 @@ async function clickFacebookPostButton(page, dialogSel) {
         const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
           const label = (btn.getAttribute('aria-label') || '').trim();
           const body = (btn.innerText || btn.textContent || '').trim();
-          return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+          return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
         });
         const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
         return { dialog, index, textboxes, hasPost, z: Number.isFinite(z) ? z : 0 };
@@ -541,7 +541,7 @@ async function clickFacebookPostButton(page, dialogSel) {
       const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
       const btn = buttons.reverse().find((el) => visible(el)
         && el.getAttribute('aria-disabled') !== 'true'
-        && /^(post|publish)$/i.test(((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())));
+        && /^(post|publish|share)$/i.test(((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())));
       if (!btn) return false;
       btn.click();
       return true;
