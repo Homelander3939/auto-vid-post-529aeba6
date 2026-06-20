@@ -382,6 +382,22 @@ async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   }
 }
 
+async function verifyFacebookComposerHasMedia(page, expectedCount) {
+  if (!expectedCount) return;
+  const dialog = await getFacebookComposerDialogLocator(page);
+  const previews = await dialog.evaluate((root) => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    return Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+  }).catch(() => 0);
+  if (previews < Math.min(expectedCount, 1)) {
+    throw new Error('Facebook media preview was not present in the final composer before posting. Leaving source files for retry.');
+  }
+}
+
 async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
   if (!imageFiles.length) return;
   const expectedCount = imageFiles.length;
@@ -738,6 +754,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await verifyFacebookComposerHasText(page, dialogSel, fullText);
+    await verifyFacebookComposerHasMedia(page, imageFiles.length);
     await clickFacebookPostButton(page, dialogSel);
 
     // Wait for the composer/spinner to fully finish. Facebook Page posts can
