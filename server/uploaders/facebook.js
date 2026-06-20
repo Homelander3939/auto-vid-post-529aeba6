@@ -831,6 +831,27 @@ async function extractFacebookPermalinkFromPageSource(page) {
   return extractFacebookPermalinkFromText(html);
 }
 
+async function clickFacebookSeePostAndReadUrl(page) {
+  const clicked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const candidates = Array.from(document.querySelectorAll('a, [role="button"], button'))
+      .filter((el) => visible(el) && /^(see|view) post$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()));
+    const target = candidates[candidates.length - 1];
+    if (!target) return false;
+    target.scrollIntoView({ block: 'center', inline: 'center' });
+    target.click();
+    return true;
+  }).catch(() => false);
+  if (!clicked) return null;
+  await page.waitForTimeout(4000);
+  return normalizeFacebookPermalink(page.url()) || normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
+}
+
 async function fetchRecentFacebookPermalinks(page, targetUrl = null, limit = 8, settleMs = 2500) {
   const scanUrl = targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)
     ? targetUrl
