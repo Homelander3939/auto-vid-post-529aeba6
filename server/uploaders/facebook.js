@@ -97,7 +97,7 @@ function extractFacebookPermalinkFromPayload(payload) {
 }
 
 async function getActiveFacebookDialogIndex(page) {
-  const clickedFallback = await page.evaluate(() => {
+  return await page.evaluate(() => {
     const visible = (el) => {
       if (!el) return false;
       const r = el.getBoundingClientRect();
