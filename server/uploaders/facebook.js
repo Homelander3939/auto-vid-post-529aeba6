@@ -442,6 +442,10 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       throw new Error('Facebook requires login. Use Prepare in Settings to log in once.');
     }
 
+    const baselinePermalinks = await fetchRecentFacebookPermalinks(page, targetUrl, 8, 1500).catch(() => []);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+
     const fullText = hashtags.length
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
       : (description || '');
@@ -510,10 +514,12 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(30000).then(() => null)]).catch(() => null);
     await page.waitForTimeout(1500);
 
-    const finalUrl = responsePermalink
-      || await resolvePostedFacebookUrl(page, targetUrl, fullText).catch(async (e) => {
-        const fromSource = await extractFacebookPermalinkFromPageSource(page);
-        if (fromSource) return fromSource;
+    const baselineSet = new Set(baselinePermalinks);
+    const normalizedResponsePermalink = normalizeFacebookPermalink(responsePermalink);
+    const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
+      || await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(async (e) => {
+        const fromSource = normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
+        if (fromSource && !baselineSet.has(fromSource)) return fromSource;
         console.error('[Facebook] Link resolution diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
         throw e;
       });
