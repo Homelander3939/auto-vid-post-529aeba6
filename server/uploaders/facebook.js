@@ -16,8 +16,11 @@ function normalizeFacebookPermalink(raw) {
   const story = url.searchParams.get('story_fbid') || url.searchParams.get('fbid');
   const owner = url.searchParams.get('id');
   const origin = 'https://www.facebook.com';
+  const combinedPath = path.match(/^\/(\d+)_(\d+)$/);
+  if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
   if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
   if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(path)
+    || /^\/(?:photo|watch|reel)$/i.test(path)
     || /\/[^/]+\/permalink\//i.test(path)
     || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(path)
     || /\/permalink\.php$/i.test(path)
@@ -71,7 +74,7 @@ function extractFacebookPermalinkFromPayload(payload) {
     }
     if (typeof value !== 'object' || seen.has(value)) return null;
     seen.add(value);
-    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href']) {
+    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href', 'share_uri', 'shareURI']) {
       const found = visit(value[key]);
       if (found) return found;
     }
@@ -91,6 +94,39 @@ function extractFacebookPermalinkFromPayload(payload) {
     return null;
   };
   return visit(payload);
+}
+
+async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
+  return await page.evaluate((selector) => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialog = document.querySelector(selector);
+    const root = dialog || document;
+    const buttons = Array.from(root.querySelectorAll('[role="button"], button'))
+      .filter(visible)
+      .map((el) => ({
+        text: (el.innerText || el.textContent || '').trim().slice(0, 50),
+        label: (el.getAttribute('aria-label') || '').slice(0, 80),
+        disabled: el.getAttribute('aria-disabled') || '',
+      }))
+      .filter((b) => /post|next|publish|share/i.test(`${b.text} ${b.label}`))
+      .slice(0, 10);
+    const previews = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+    const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).filter(visible).length;
+    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
+    return {
+      url: location.href,
+      dialogVisible: Boolean(dialog && visible(dialog)),
+      text: (textbox?.innerText || textbox?.textContent || '').trim().slice(0, 180),
+      previews,
+      busy,
+      buttons,
+      message: (root.innerText || root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 350),
+    };
+  }, dialogSel).catch((e) => ({ error: e.message }));
 }
 
 function waitForFacebookCreatePostResponse(page, timeout = 90000) {
@@ -151,6 +187,70 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
   throw new Error('Facebook media upload did not finish. Leaving source files for retry.');
 }
 
+async function getFacebookPostButton(page, dialogSel) {
+  const groups = [
+    page.locator(`${dialogSel} [aria-label="Post"][role="button"]`),
+    page.locator(`${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`),
+    page.locator(`${dialogSel} [aria-label="Publish"][role="button"], ${dialogSel} div[role="button"]:has-text("Publish")`),
+    page.getByRole('button', { name: /^Post$/ }),
+  ];
+  let fallback = null;
+  for (const buttons of groups) {
+    const count = await buttons.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const box = await btn.boundingBox().catch(() => null);
+      if (!box || box.width < 20 || box.height < 20) continue;
+      const label = await btn.getAttribute('aria-label').catch(() => '') || '';
+      const text = await btn.innerText().catch(() => '') || '';
+      if (/postpone/i.test(`${label} ${text}`)) continue;
+      if (/^(post|publish)$/i.test(label.trim()) || /^(post|publish)$/i.test(text.trim()) || /\bpost\b/i.test(text)) return btn;
+      fallback = fallback || btn;
+    }
+  }
+  return fallback || page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
+}
+
+async function clickFacebookPostButton(page, dialogSel) {
+  const postBtn = await getFacebookPostButton(page, dialogSel);
+  await postBtn.waitFor({ state: 'visible', timeout: 20000 });
+  for (let i = 0; i < 45; i++) {
+    const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+    if (disabled !== 'true') break;
+    await page.waitForTimeout(500);
+  }
+  const stillDisabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+  if (stillDisabled === 'true') {
+    console.error('[Facebook] Disabled Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
+  }
+  await postBtn.scrollIntoViewIfNeeded().catch(() => {});
+  let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) {
+    clicked = await page.evaluate((selector) => {
+      const dialog = document.querySelector(selector) || document;
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+      const btn = buttons.reverse().find((el) => visible(el)
+        && el.getAttribute('aria-disabled') !== 'true'
+        && /^(post|publish)$/i.test(((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())));
+      if (!btn) return false;
+      btn.click();
+      return true;
+    }, dialogSel).catch(() => false);
+  }
+  if (!clicked) {
+    console.error('[Facebook] Click Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Could not click the Facebook Post button. Leaving source files for retry.');
+  }
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
@@ -165,8 +265,10 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
         const id = u.searchParams.get('id');
         const origin = 'https://www.facebook.com';
+        const combinedPath = p.match(/^\/(\d+)_(\d+)$/);
+        if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
         if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
-        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
+        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /^\/(?:photo|watch|reel)$/i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
           for (const key of ['story_fbid', 'fbid', 'id']) {
             const value = u.searchParams.get(key);
@@ -192,7 +294,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
       const anchors = Array.from(article.querySelectorAll('a[href]'));
       const direct = anchors
         .map((a) => ({ href: a.getAttribute('href') || '', text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim() }))
-        .filter((a) => !/comment|reaction|profile.php\?id=/i.test(a.href))
+        .filter((a) => !/comment|reaction|profile.php\?id=|\/friends\//i.test(a.href))
         .sort((a, b) => (/just now|\d+\s*(m|min)|hour|yesterday|at/i.test(b.text) ? 1 : 0) - (/just now|\d+\s*(m|min)|hour|yesterday|at/i.test(a.text) ? 1 : 0));
       for (const a of direct) {
         const out = normalizeUrl(a.href);
@@ -201,6 +303,11 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
     }
     return null;
   }, snippet).catch(() => null);
+}
+
+async function extractFacebookPermalinkFromPageSource(page) {
+  const html = await page.content().catch(() => '');
+  return extractFacebookPermalinkFromText(html);
 }
 
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
@@ -350,35 +457,31 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       } else break;
     }
 
-    const postBtn = page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
-    await postBtn.waitFor({ state: 'visible', timeout: 15000 });
-    // Wait for enabled
-    for (let i = 0; i < 30; i++) {
-      const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
-      if (disabled !== 'true') break;
-      await page.waitForTimeout(500);
-    }
-    const stillDisabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
-    if (stillDisabled === 'true') {
-      throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
-    }
     const createPostPromise = waitForFacebookCreatePostResponse(page, 90000);
-    await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
+    await clickFacebookPostButton(page, dialogSel);
 
     // Wait for dialog to close (post published) — real success signal
     const dialogClosed = await page.locator(dialogSel).first()
-      .waitFor({ state: 'detached', timeout: 45000 })
+      .waitFor({ state: 'hidden', timeout: 60000 })
       .then(() => true).catch(() => false);
     if (!dialogClosed) {
       const stillOpen = await page.locator(dialogSel).first().isVisible().catch(() => false);
       if (stillOpen) {
+        console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
         throw new Error('Facebook did not confirm the post (composer still open). Leaving source files for retry.');
       }
     }
-    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(8000).then(() => null)]).catch(() => null);
+    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(30000).then(() => null)]).catch(() => null);
     await page.waitForTimeout(1500);
 
-    return { url: responsePermalink || await resolvePostedFacebookUrl(page, targetUrl, fullText) };
+    const finalUrl = responsePermalink
+      || await resolvePostedFacebookUrl(page, targetUrl, fullText).catch(async (e) => {
+        const fromSource = await extractFacebookPermalinkFromPageSource(page);
+        if (fromSource) return fromSource;
+        console.error('[Facebook] Link resolution diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+        throw e;
+      });
+    return { url: finalUrl };
   } finally {
     await safeClose(context);
   }

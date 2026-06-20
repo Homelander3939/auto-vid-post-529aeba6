@@ -134,16 +134,30 @@ async function ensureXTextWithinLimit(page, textArea, desiredText) {
 }
 
 async function getXPostButton(page) {
-  const buttons = page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]');
-  const count = await buttons.count().catch(() => 0);
-  for (let i = count - 1; i >= 0; i--) {
-    const btn = buttons.nth(i);
-    if (!(await btn.isVisible().catch(() => false))) continue;
-    const label = await btn.getAttribute('aria-label').catch(() => '') || '';
-    const text = await btn.innerText().catch(() => '') || '';
-    if (/^post$/i.test(label.trim()) || /\bpost\b/i.test(text)) return btn;
+  const locatorGroups = [
+    page.locator('[role="dialog"] [data-testid="tweetButton"], [role="dialog"] [aria-label="Post"][role="button"]'),
+    page.locator('[data-testid="primaryColumn"] [data-testid="tweetButtonInline"], [data-testid="primaryColumn"] [data-testid="tweetButton"], [data-testid="primaryColumn"] [aria-label="Post"][role="button"]'),
+    page.locator('main [data-testid="tweetButtonInline"], main [data-testid="tweetButton"], main [aria-label="Post"][role="button"]'),
+    page.getByRole('button', { name: /^Post$/ }),
+    page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]'),
+  ];
+
+  let fallback = null;
+  for (const buttons of locatorGroups) {
+    const count = await buttons.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const box = await btn.boundingBox().catch(() => null);
+      if (!box || box.width < 20 || box.height < 20) continue;
+      const label = await btn.getAttribute('aria-label').catch(() => '') || '';
+      const text = await btn.innerText().catch(() => '') || '';
+      const looksLikePost = /^post$/i.test(label.trim()) || /^post$/i.test(text.trim()) || /\bpost\b/i.test(text);
+      if (looksLikePost) return btn;
+      fallback = fallback || btn;
+    }
   }
-  return buttons.last();
+  return fallback || page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]').last();
 }
 
 async function isXPostButtonEnabled(page) {
@@ -204,7 +218,10 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
     }
     const postEnabled = await isXPostButtonEnabled(page).catch(() => false);
     const hasExpectedPreview = state.previews >= Math.min(expectedCount, X_MAX_IMAGES);
-    const readyEnough = postEnabled && !state.busy && hasExpectedPreview;
+    // X often leaves a decorative/progress element visible after images already
+    // have previews and the real Post button is enabled. Button-enabled + stable
+    // expected previews is the strongest publish-ready signal.
+    const readyEnough = postEnabled && hasExpectedPreview;
     if (readyEnough) {
       if (!stableReadySince) stableReadySince = Date.now();
       if (Date.now() - stableReadySince >= 2500) return true;
@@ -257,6 +274,10 @@ async function clickXPostButton(page) {
       return true;
     }).catch(() => false);
   }
+  if (!clicked) {
+    const rolePost = page.getByRole('button', { name: /^Post$/ }).last();
+    clicked = await rolePost.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  }
   if (!clicked) throw new Error('Could not click the X Post button. Leaving source files for retry.');
 }
 
@@ -265,6 +286,34 @@ async function visibleXProblemText(page) {
     const nodes = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'));
     return nodes.map((n) => (n.innerText || n.textContent || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
   }).catch(() => '');
+}
+
+async function getXDiagnostics(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+    };
+    const buttons = Array.from(document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"], button, div[role="button"]'))
+      .filter(visible)
+      .map((el) => ({
+        text: (el.innerText || el.textContent || '').trim().slice(0, 40),
+        label: (el.getAttribute('aria-label') || '').slice(0, 80),
+        testid: el.getAttribute('data-testid') || '',
+        disabled: el.getAttribute('aria-disabled') || '',
+      }))
+      .filter((b) => /post/i.test(`${b.text} ${b.label} ${b.testid}`))
+      .slice(0, 8);
+    const composer = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]')?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
+    const previews = Array.from(composer.querySelectorAll('[data-testid="attachments"] img, [data-testid="attachments"] video, img[src^="blob:"], video[src^="blob:"], [style*="blob:"]')).filter(visible).length;
+    const busy = Array.from(composer.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i], [data-testid*="progress" i]')).filter(visible).length;
+    const textbox = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+    const text = (textbox?.innerText || textbox?.textContent || '').trim().slice(0, 180);
+    const message = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+      .map((n) => (n.innerText || n.textContent || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
+    return { url: location.href, text, previews, busy, buttons, message };
+  }).catch((e) => ({ error: e.message }));
 }
 
 async function extractXStatusUrl(page) {
@@ -316,6 +365,13 @@ function waitForXCreateTweetResponse(page, fallbackHandle, timeout = 90000) {
     };
     page.on('response', onResponse);
   });
+}
+
+async function waitForCreateTweetUrl(promise, timeout = 30000) {
+  return await Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), timeout)),
+  ]).catch(() => null);
 }
 
 async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
@@ -428,7 +484,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000);
-      const responseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
+      const responseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
       confirmed = result.confirmed;
       publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
@@ -436,7 +492,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         await textArea.click().catch(() => {});
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
         result = await waitForXPublishConfirmation(page, textArea, 15000);
-        const shortcutResponseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
+        const shortcutResponseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
         confirmed = result.confirmed;
         publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
         lastError = result.error || lastError;
@@ -446,11 +502,13 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
 
     if (!confirmed) {
       const errToast = lastError || await visibleXProblemText(page);
+      console.error('[X] Publish diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
     }
 
     const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, postedText);
     if (!/\/status\/\d+/.test(finalUrl)) {
+      console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
     }
     return { url: finalUrl };

@@ -64,28 +64,35 @@ async function downloadImages(supabase, post) {
 
 function cleanupSourceFiles(sourceMeta, shouldClean) {
   const src = sourceMeta || {};
-  if (!src.folder || !Array.isArray(src.files) || !src.files.length) return '';
+  if (!src.folder || !Array.isArray(src.files) || !src.files.length) {
+    return shouldClean ? '\n\n🧹 No local source-file metadata was available, so no source files were removed.' : '';
+  }
 
   if (!shouldClean) {
-    return `\n\n🧹 Source files kept for retry in ${cleanTelegramText(src.folder, 120)}`;
+    return `\n\n🧹 Source files kept for retry in ${cleanTelegramText(src.folder, 120)} because not every selected platform confirmed successfully.`;
   }
 
   const removed = [];
   const failed = [];
+  const missing = [];
   for (const name of src.files) {
     const full = path.join(src.folder, name);
     try {
-      if (fs.existsSync(full)) { fs.unlinkSync(full); removed.push(name); }
+      if (!fs.existsSync(full)) { missing.push(name); continue; }
+      fs.unlinkSync(full);
+      if (fs.existsSync(full)) failed.push(`${name} (delete reported success but file still exists)`);
+      else removed.push(name);
     } catch (e) {
       failed.push(`${name} (${e.message})`);
     }
   }
 
-  let line = removed.length
-    ? `\n\n🧹 Posted successfully and cleared ${removed.length} source file(s) from ${cleanTelegramText(src.folder, 120)}`
-    : `\n\n🧹 No source files found to clear in ${cleanTelegramText(src.folder, 120)}`;
+  let line = `\n\n🧹 Cleanup checked ${src.files.length} source file(s) in ${cleanTelegramText(src.folder, 120)}.`;
+  if (removed.length) line += ` Removed ${removed.length}: ${cleanTelegramText(removed.join(', '), 220)}.`;
+  else line += ' Removed 0.';
+  if (missing.length) line += ` Missing ${missing.length}: ${cleanTelegramText(missing.join(', '), 180)}.`;
   if (removed.length) console.log(`[SocialPosts] Removed ${removed.length} source file(s) from ${src.folder}`);
-  if (failed.length) line += `\n⚠️ Could not delete: ${cleanTelegramText(failed.join(', '), 200)}`;
+  if (failed.length) line += `\n⚠️ Could not delete ${failed.length}: ${cleanTelegramText(failed.join(', '), 240)}`;
   return line;
 }
 
