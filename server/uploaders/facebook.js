@@ -251,6 +251,53 @@ async function clickFacebookPostButton(page, dialogSel) {
   }
 }
 
+async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  const state = await page.evaluate((selector) => {
+    const root = document.querySelector(selector) || document;
+    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
+    return (textbox?.innerText || textbox?.textContent || '').trim();
+  }, dialogSel).catch(() => '');
+  const normalized = normalizePostText(state);
+  if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
+    throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
+  }
+}
+
+async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000) {
+  const deadline = Date.now() + timeout;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate((selector) => {
+      const dialog = document.querySelector(selector);
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const root = dialog || document;
+      const text = (root.innerText || root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 1000);
+      const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Posting" i], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
+      const postButtonVisible = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && /^(post|publish)$/i.test(label || body);
+      });
+      return { dialogVisible: visible(dialog), busy, postButtonVisible, text };
+    }, dialogSel).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
+    lastState = state;
+    if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
+      throw new Error(`Facebook rejected the post: ${state.text.slice(0, 260)}. Leaving source files for retry.`);
+    }
+    if (!state.dialogVisible) return true;
+    if (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || '')) return true;
+    await page.waitForTimeout(3000);
+  }
+  console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+  throw new Error(`Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes${lastState?.text ? `: ${lastState.text.slice(0, 220)}` : ''}. Leaving source files for retry.`);
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
@@ -338,6 +385,53 @@ async function fetchRecentFacebookPermalinks(page, targetUrl = null, limit = 8, 
   return Array.from(new Set((Array.isArray(hrefs) ? hrefs : []).map(normalizeFacebookPermalink).filter(Boolean)));
 }
 
+async function fetchRecentFacebookPostCandidates(page, targetUrl = null, limit = 8, settleMs = 2500) {
+  const scanUrl = targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)
+    ? targetUrl
+    : 'https://www.facebook.com/me';
+  await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  return await page.evaluate((maxItems) => {
+    const normalizeUrl = (raw) => {
+      try {
+        const u = new URL(raw, 'https://www.facebook.com');
+        if (!/(^|\.)(facebook|fb)\.com$/i.test(u.hostname)) return null;
+        const p = u.pathname.replace(/\/$/, '');
+        const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
+        const id = u.searchParams.get('id');
+        if (story && id) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
+        if (/story_fbid=|fbid=|\/posts\/|\/permalink\.php|\/story\.php|\/photo\.php|\/videos?\/|\/reel\/|\/groups\/[^/]+\/(?:posts|permalink)\/|\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(`${p}?${u.searchParams}`)) {
+          const keep = new URLSearchParams();
+          for (const key of ['story_fbid', 'fbid', 'id']) {
+            const value = u.searchParams.get(key);
+            if (value) keep.set(key, value);
+          }
+          const query = keep.toString();
+          return `https://www.facebook.com${p}${query ? `?${query}` : ''}`;
+        }
+      } catch {}
+      return null;
+    };
+    const out = [];
+    const seen = new Set();
+    const articles = Array.from(document.querySelectorAll('[role="article"]')).slice(0, maxItems * 2);
+    for (const article of articles) {
+      const text = (article.innerText || article.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 700);
+      const fresh = /\b(just now|now|\d+\s*(m|min|mins|minute|minutes))\b/i.test(text);
+      for (const a of Array.from(article.querySelectorAll('a[href]'))) {
+        const href = a.getAttribute('href') || '';
+        if (/comment|reaction|profile\.php\?id=|\/friends\//i.test(href)) continue;
+        const normalized = normalizeUrl(href);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push({ url: normalized, text, fresh });
+        if (out.length >= maxItems) return out;
+      }
+    }
+    return out;
+  }, limit).catch(() => []);
+}
+
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const articles = page.locator('[role="article"]');
   const count = Math.min(await articles.count().catch(() => 0), 5);
@@ -379,9 +473,15 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
 
 async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', baselineUrls = []) {
   const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
+  const wanted = normalizePostText(snippet).slice(0, 90);
   const fresh = (url) => {
     const normalized = normalizeFacebookPermalink(url);
     return normalized && !baselineSet.has(normalized) ? normalized : null;
+  };
+  const textMatches = (body = '') => {
+    if (!wanted) return true;
+    const normalized = normalizePostText(body);
+    return normalized.includes(wanted.slice(0, Math.min(45, wanted.length)));
   };
   const direct = normalizeFacebookPermalink(page.url());
   if (direct && !baselineSet.has(direct)) return direct;
@@ -410,8 +510,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   urlsToScan.push('https://www.facebook.com/me');
   for (const scanUrl of urlsToScan) {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await page.waitForTimeout(3000 + attempt * 1500);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await page.waitForTimeout(4000 + Math.min(attempt, 8) * 1500);
+      const candidates = await fetchRecentFacebookPostCandidates(page, scanUrl, 10, 1000).catch(() => []);
+      const matchingCandidate = candidates.find((item) => fresh(item?.url) && textMatches(item?.text || ''));
+      if (matchingCandidate) return fresh(matchingCandidate.url);
+      const anyFreshCandidate = candidates.find((item) => fresh(item?.url) && item?.fresh);
+      if (!wanted && anyFreshCandidate) return fresh(anyFreshCandidate.url);
       const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
@@ -468,8 +573,9 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     });
     await page.waitForTimeout(800);
 
-    // Dismiss any hashtag autocomplete popover that may be intercepting clicks
-    await page.keyboard.press('Escape').catch(() => {});
+    // Do not press Escape here: on Facebook it can close the composer/draft
+    // instead of only closing hashtag autocomplete. We keep the dialog open and
+    // click the scoped Post button directly.
     await page.waitForTimeout(300);
 
     if (imageFiles.length) {
@@ -484,8 +590,6 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await waitForFacebookMediaReady(page, dialogSel, imageFiles.length, 120000);
     }
 
-    // Dismiss popovers again before clicking buttons
-    await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(400);
 
     // Some FB flows show "Next" before Post (e.g. when media is attached or for Pages)
@@ -498,22 +602,12 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     }
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
+    await verifyFacebookComposerHasText(page, dialogSel, fullText);
     await clickFacebookPostButton(page, dialogSel);
 
-    // Wait for the composer to actually close — that is Facebook's real
-    // "post succeeded" signal. The publish spinner ("rolling around loading
-    // long time") can run for well over a minute on slow accounts, so give
-    // it a generous window instead of bailing early.
-    const dialogClosed = await page.locator(dialogSel).first()
-      .waitFor({ state: 'hidden', timeout: 180000 })
-      .then(() => true).catch(() => false);
-    if (!dialogClosed) {
-      const stillOpen = await page.locator(dialogSel).first().isVisible().catch(() => false);
-      if (stillOpen) {
-        console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
-        throw new Error('Facebook did not confirm the post (composer still spinning after 3 minutes). Leaving source files for retry.');
-      }
-    }
+    // Wait for the composer/spinner to fully finish. Facebook Page posts can
+    // keep rolling for several minutes; do not close or resolve early.
+    await waitForFacebookComposerToFinish(page, dialogSel, 420000);
 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.

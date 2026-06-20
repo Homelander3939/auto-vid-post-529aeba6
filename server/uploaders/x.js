@@ -107,27 +107,32 @@ async function insertXText(page, textArea, text) {
   await textArea.click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
-  await textArea.evaluate((el) => {
-    el.textContent = '';
-    el.innerHTML = '';
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    document.execCommand('delete', false);
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null }));
-  }).catch(() => {});
-  const inserted = await textArea.evaluate((el, value) => {
-    el.focus();
-    el.textContent = '';
-    el.innerHTML = '';
-    const ok = document.execCommand('insertText', false, value || '');
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return ok || Boolean((el.innerText || el.textContent || '').trim());
-  }, text).catch(() => false);
-  if (!inserted) await page.keyboard.insertText(text);
+  await page.waitForTimeout(250);
+
+  // X is React-controlled. Directly setting textContent can make text appear
+  // visually while the internal composer state remains empty, producing a
+  // media-only post. Use real keyboard insertion first so React receives the
+  // same input events a human typing/pasting would create.
+  await page.keyboard.insertText(text || '').catch(() => {});
+  await page.waitForTimeout(400);
+
+  let visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+  if (!visibleText && text) {
+    await textArea.click().catch(() => {});
+    await page.keyboard.type(text, { delay: 1 }).catch(() => {});
+    await page.waitForTimeout(400);
+    visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+  }
+  if (!visibleText && text) {
+    const inserted = await textArea.evaluate((el, value) => {
+      el.focus();
+      const ok = document.execCommand('insertText', false, value || '');
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return ok || Boolean((el.innerText || el.textContent || '').trim());
+    }, text).catch(() => false);
+    if (!inserted) throw new Error('X composer text could not be inserted. Leaving source files for retry.');
+  }
 }
 
 async function ensureXTextWithinLimit(page, textArea, desiredText) {
@@ -300,6 +305,36 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
   throw new Error(`X media upload did not become publish-ready.${detail}. Leaving source files for retry.`);
 }
 
+async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
+  const expected = String(expectedText || '').trim();
+  const expectedNeedle = expected.replace(/\s+/g, ' ').slice(0, Math.min(80, expected.length));
+  const deadline = Date.now() + timeout;
+  let last = '';
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => {
+      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+      const text = (el?.innerText || el?.textContent || '').trim();
+      const composer = el?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
+      const enabledButton = Array.from(composer.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"], button, [role="button"]'))
+        .some((btn) => {
+          const r = btn.getBoundingClientRect();
+          const s = window.getComputedStyle(btn);
+          const label = (btn.getAttribute('aria-label') || '').trim();
+          const body = (btn.innerText || btn.textContent || '').trim();
+          return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
+            && btn.getAttribute('aria-disabled') !== 'true' && !btn.disabled
+            && (/^post$/i.test(label) || /^post$/i.test(body));
+        });
+      return { text, enabledButton };
+    }).catch(() => ({ text: '', enabledButton: false }));
+    last = state.text || '';
+    const normalized = last.replace(/\s+/g, ' ');
+    if (state.enabledButton && last && (!expectedNeedle || normalized.includes(expectedNeedle))) return true;
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`X composer text was not committed before posting (visible text: ${last.slice(0, 120) || 'empty'}). Leaving source files for retry.`);
+}
+
 async function waitForEnabledXPostButton(page, timeout = 90000) {
   const deadline = Date.now() + timeout;
   let lastButton = null;
@@ -316,7 +351,7 @@ async function waitForEnabledXPostButton(page, timeout = 90000) {
 }
 
 async function clickXPostButton(page) {
-  const btn = await waitForEnabledXPostButton(page);
+  const btn = await waitForEnabledXPostButton(page, 45000);
   const ariaDisabled = await btn.getAttribute('aria-disabled').catch(() => null);
   const disabled = await btn.isDisabled().catch(() => false);
   let clicked = false;
@@ -345,10 +380,6 @@ async function clickXPostButton(page) {
       await page.mouse.click(coords.x, coords.y);
       clicked = true;
     }
-  }
-  if (!clicked) {
-    const rolePost = page.getByRole('button', { name: /^Post$/ }).last();
-    clicked = await rolePost.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
   }
   if (!clicked) throw new Error('Could not click the X Post button. Leaving source files for retry.');
 }
@@ -524,6 +555,22 @@ async function resolvePostedXUrl(page, handle, snippet, baselineUrls = []) {
   return null;
 }
 
+async function verifyPostedXUrlContainsText(page, url, expectedText) {
+  const expected = String(expectedText || '').trim().replace(/\s+/g, ' ');
+  if (!expected || !url) return true;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  const articleText = await page.evaluate(() => {
+    const article = document.querySelector('article');
+    return (article?.innerText || article?.textContent || '').trim().replace(/\s+/g, ' ');
+  }).catch(() => '');
+  const needle = expected.slice(0, Math.min(45, expected.length));
+  if (needle && !articleText.includes(needle)) {
+    throw new Error('X published URL did not contain the intended text, so it is not treated as a successful post. Leaving source files for retry.');
+  }
+  return true;
+}
+
 async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const xImageFiles = imageFiles.slice(0, X_MAX_IMAGES);
@@ -593,16 +640,18 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       // it. Refuse to click Post on an empty textbox — that's how we ended up
       // posting media-only tweets previously.
       const currentText = await readComposerText();
-      if (!currentText) {
+      const currentNeedle = postedText.replace(/\s+/g, ' ').slice(0, Math.min(80, postedText.length));
+      if (!currentText || (currentNeedle && !currentText.replace(/\s+/g, ' ').includes(currentNeedle))) {
         await textArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
         await insertXText(page, textArea, postedText);
         await page.waitForTimeout(800);
         const recheck = await readComposerText();
-        if (!recheck) {
-          throw new Error('X composer lost its text before posting and could not be refilled. Leaving source files for retry.');
+        if (!recheck || (currentNeedle && !recheck.replace(/\s+/g, ' ').includes(currentNeedle))) {
+          throw new Error('X composer lost or changed its text before posting and could not be refilled. Leaving source files for retry.');
         }
       }
 
+      await verifyXComposerHasText(page, postedText, 15000);
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000, myHandle);
@@ -626,6 +675,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error('X post was submitted, but a new exact profile status URL could not be verified. Leaving source files for retry.');
     }
+    await verifyPostedXUrlContainsText(page, finalUrl, postedText);
     return { url: finalUrl };
   } finally {
     await safeClose(context);
