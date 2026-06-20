@@ -4,6 +4,52 @@ const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
+const X_MAX_CHARS = 280;
+const X_SAFE_CHARS = 275;
+
+function xLength(value) {
+  return Array.from(String(value || '').replace(/\r\n/g, '\n')).length;
+}
+
+function trimToXLimit(value, limit = X_SAFE_CHARS) {
+  const chars = Array.from(String(value || '').trim());
+  if (chars.length <= limit) return chars.join('');
+  const hard = chars.slice(0, Math.max(0, limit - 1)).join('');
+  const soft = hard.replace(/\s+\S{0,24}$/, '').trim();
+  return `${(soft.length >= 80 ? soft : hard).trim()}…`;
+}
+
+function formatXHashtags(hashtags = []) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(hashtags) ? hashtags : []) {
+    const tag = String(raw || '').trim().replace(/^#+/, '').replace(/[^\p{L}\p{N}_]/gu, '');
+    if (!tag || seen.has(tag.toLowerCase())) continue;
+    seen.add(tag.toLowerCase());
+    out.push(`#${tag}`);
+  }
+  return out;
+}
+
+function buildXPostText(description, hashtags = []) {
+  const desc = String(description || '').replace(/\s+/g, ' ').trim();
+  const tags = formatXHashtags(hashtags);
+  const fittingTags = [];
+  for (const tag of tags) {
+    const candidateTags = fittingTags.concat(tag).join(' ');
+    if (xLength(candidateTags) <= 80) fittingTags.push(tag);
+  }
+  let tagLine = fittingTags.join(' ');
+  while (tagLine && xLength(tagLine) > X_SAFE_CHARS) {
+    fittingTags.pop();
+    tagLine = fittingTags.join(' ');
+  }
+  if (!desc) return trimToXLimit(tagLine, X_SAFE_CHARS);
+  const separator = tagLine ? '\n\n' : '';
+  const descLimit = X_SAFE_CHARS - xLength(separator) - xLength(tagLine);
+  const safeDesc = trimToXLimit(desc, Math.max(40, descLimit));
+  return trimToXLimit(`${safeDesc}${separator}${tagLine}`.trim(), X_SAFE_CHARS);
+}
 
 function handleFromXUrl(raw) {
   if (!raw) return null;
@@ -42,6 +88,14 @@ async function getMyHandle(page) {
 
 async function insertXText(page, textArea, text) {
   await textArea.click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  await page.evaluate(() => {
+    const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+    if (!el) return;
+    el.textContent = '';
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null }));
+  }).catch(() => {});
   const inserted = await page.evaluate((value) => {
     const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
     if (!el) return false;
@@ -52,6 +106,31 @@ async function insertXText(page, textArea, text) {
     return ok || Boolean((el.innerText || el.textContent || '').trim());
   }, text).catch(() => false);
   if (!inserted) await page.keyboard.insertText(text);
+}
+
+async function ensureXTextWithinLimit(page, textArea, desiredText) {
+  let safeText = trimToXLimit(desiredText, X_SAFE_CHARS);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await page.evaluate(() => {
+      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+      const text = (el?.innerText || el?.textContent || '').trim();
+      const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+        .map((n) => (n.innerText || n.textContent || '').trim())
+        .filter(Boolean)
+        .join(' | ')
+        .slice(0, 500);
+      return { text, problem };
+    }).catch(() => ({ text: '', problem: '' }));
+    const over = String(state.problem || '').match(/exceeded the character limit by\s+(\d+)/i);
+    if (xLength(state.text) <= X_MAX_CHARS && !over && !/upgrade to premium to write longer posts|character limit/i.test(state.problem || '')) {
+      return safeText;
+    }
+    const reduceBy = over ? Number(over[1]) + 8 : Math.max(8, xLength(state.text) - X_SAFE_CHARS + 8);
+    safeText = trimToXLimit(safeText, Math.max(40, xLength(safeText) - reduceBy));
+    await insertXText(page, textArea, safeText);
+    await page.waitForTimeout(500);
+  }
+  return safeText;
 }
 
 async function getXPostButton(page) {
