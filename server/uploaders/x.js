@@ -580,6 +580,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000, myHandle);
       const responseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
+      if (responseUrl && !myHandle) myHandle = handleFromXUrl(responseUrl) || myHandle;
       confirmed = result.confirmed;
       publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
@@ -588,6 +589,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
         result = await waitForXPublishConfirmation(page, textArea, 15000, myHandle);
         const shortcutResponseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
+        if (shortcutResponseUrl && !myHandle) myHandle = handleFromXUrl(shortcutResponseUrl) || myHandle;
         confirmed = result.confirmed;
         publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
         lastError = result.error || lastError;
@@ -602,7 +604,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     }
 
     const finalUrl = normalizeXStatusUrl(publishedUrl, myHandle)
-      || await resolvePostedXUrl(page, myHandle, postedText, baselineProfileStatusUrls);
+      || (myHandle ? await resolvePostedXUrl(page, myHandle, postedText, baselineProfileStatusUrls) : null);
     if (!finalUrl || !/\/status\/\d+/.test(finalUrl)) {
       console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error('X post was submitted, but a new exact profile status URL could not be verified. Leaving source files for retry.');
