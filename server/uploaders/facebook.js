@@ -130,7 +130,7 @@ async function getActiveFacebookDialogLocator(page) {
 async function clickFacebookNextSteps(page, maxSteps = 4) {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
-    const buttons = dialog.locator('[aria-label="Next"][role="button"], div[role="button"]:has-text("Next")');
+    const buttons = dialog.locator('[role="button"], button');
     const count = await buttons.count().catch(() => 0);
     let clicked = false;
     for (let i = count - 1; i >= 0; i--) {
@@ -138,6 +138,10 @@ async function clickFacebookNextSteps(page, maxSteps = 4) {
       if (!(await btn.isVisible().catch(() => false))) continue;
       const disabled = await btn.getAttribute('aria-disabled').catch(() => null);
       if (disabled === 'true') continue;
+      const label = (await btn.getAttribute('aria-label').catch(() => '') || '').trim();
+      const body = (await btn.innerText().catch(() => '') || '').trim();
+      const name = label || body;
+      if (!/^(next|done|continue)$/i.test(name)) continue;
       await btn.scrollIntoViewIfNeeded().catch(() => {});
       clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
       if (!clicked) clicked = await btn.click({ force: true, timeout: 8000 }).then(() => true).catch(() => false);
@@ -151,8 +155,7 @@ async function clickFacebookNextSteps(page, maxSteps = 4) {
 
 async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing = false } = {}) {
   const expected = normalizePostText(fullText).slice(0, 90);
-  const dialog = await getFacebookComposerDialogLocator(page);
-  const textbox = dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+  const textbox = await getFacebookTextComposerLocator(page);
   await textbox.waitFor({ state: 'visible', timeout: 20000 });
   const current = await textbox.innerText({ timeout: 3000 }).catch(() => '');
   const normalizedCurrent = normalizePostText(current);
@@ -166,6 +169,26 @@ async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMiss
     });
   }
   await page.waitForTimeout(900);
+  const written = await facebookTextExistsInComposer(page, fullText);
+  if (expected && !written) {
+    const inserted = await textbox.evaluate((el, value) => {
+      el.focus();
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('delete', false, null);
+      const ok = document.execCommand('insertText', false, value || '');
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return ok || Boolean((el.innerText || el.textContent || '').trim());
+    }, fullText).catch(() => false);
+    await page.waitForTimeout(600);
+    if (!inserted || !(await facebookTextExistsInComposer(page, fullText))) {
+      throw new Error('Facebook composer text could not be inserted. Leaving source files for retry.');
+    }
+  }
 }
 
 async function getFacebookComposerDialogIndex(page) {
