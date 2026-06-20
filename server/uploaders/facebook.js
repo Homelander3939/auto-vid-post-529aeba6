@@ -97,7 +97,7 @@ function extractFacebookPermalinkFromPayload(payload) {
 }
 
 async function getActiveFacebookDialogIndex(page) {
-  return await page.evaluate(() => {
+  const clickedFallback = await page.evaluate(() => {
     const visible = (el) => {
       if (!el) return false;
       const r = el.getBoundingClientRect();
@@ -224,6 +224,8 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
     scored[0].el.click();
     return true;
   }).catch(() => false);
+  if (!clickedFallback) return false;
+  await page.waitForTimeout(1500);
   if (!(await facebookComposerOpen(page))) await closeFacebookNonComposerDialogs(page);
   if (await facebookComposerOpen(page)) return true;
   return false;
