@@ -338,6 +338,53 @@ async function fetchRecentFacebookPermalinks(page, targetUrl = null, limit = 8, 
   return Array.from(new Set((Array.isArray(hrefs) ? hrefs : []).map(normalizeFacebookPermalink).filter(Boolean)));
 }
 
+async function fetchRecentFacebookPostCandidates(page, targetUrl = null, limit = 8, settleMs = 2500) {
+  const scanUrl = targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)
+    ? targetUrl
+    : 'https://www.facebook.com/me';
+  await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  return await page.evaluate((maxItems) => {
+    const normalizeUrl = (raw) => {
+      try {
+        const u = new URL(raw, 'https://www.facebook.com');
+        if (!/(^|\.)(facebook|fb)\.com$/i.test(u.hostname)) return null;
+        const p = u.pathname.replace(/\/$/, '');
+        const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
+        const id = u.searchParams.get('id');
+        if (story && id) return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
+        if (/story_fbid=|fbid=|\/posts\/|\/permalink\.php|\/story\.php|\/photo\.php|\/videos?\/|\/reel\/|\/groups\/[^/]+\/(?:posts|permalink)\/|\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(`${p}?${u.searchParams}`)) {
+          const keep = new URLSearchParams();
+          for (const key of ['story_fbid', 'fbid', 'id']) {
+            const value = u.searchParams.get(key);
+            if (value) keep.set(key, value);
+          }
+          const query = keep.toString();
+          return `https://www.facebook.com${p}${query ? `?${query}` : ''}`;
+        }
+      } catch {}
+      return null;
+    };
+    const out = [];
+    const seen = new Set();
+    const articles = Array.from(document.querySelectorAll('[role="article"]')).slice(0, maxItems * 2);
+    for (const article of articles) {
+      const text = (article.innerText || article.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 700);
+      const fresh = /\b(just now|now|\d+\s*(m|min|mins|minute|minutes))\b/i.test(text);
+      for (const a of Array.from(article.querySelectorAll('a[href]'))) {
+        const href = a.getAttribute('href') || '';
+        if (/comment|reaction|profile\.php\?id=|\/friends\//i.test(href)) continue;
+        const normalized = normalizeUrl(href);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push({ url: normalized, text, fresh });
+        if (out.length >= maxItems) return out;
+      }
+    }
+    return out;
+  }, limit).catch(() => []);
+}
+
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const articles = page.locator('[role="article"]');
   const count = Math.min(await articles.count().catch(() => 0), 5);
