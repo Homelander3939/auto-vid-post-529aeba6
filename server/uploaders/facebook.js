@@ -743,7 +743,7 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
       if (permalink) return permalink;
-      const opened = fresh(await openFreshFacebookArticleAndReadUrl(page, snippet, baselinePermalinks));
+      const opened = fresh(await openFreshFacebookArticleAndReadUrl(page, snippet, baselineUrls));
       if (opened) return opened;
       const recent = await fetchRecentFacebookPermalinks(page, scanUrl, 8, 1000).catch(() => []);
       const newRecent = recent.find((url) => !baselineSet.has(url));
