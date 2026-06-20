@@ -141,6 +141,14 @@ function normalisePlatform(p: string): string | null {
   return null;
 }
 
+// Strip useless baked-in prefixes like "TechPulse: 1. Gaming:" from manifest text.
+function stripTechPulsePrefix(text: string): string {
+  return String(text || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:]+\s*:\s*/, '')
+    .trim();
+}
+
 // Build text per platform from parsed sections.
 // LinkedIn + Facebook share LINKEDIN_FACEBOOK_POST.
 // X uses X_THREAD_OR_LONG_POST.
