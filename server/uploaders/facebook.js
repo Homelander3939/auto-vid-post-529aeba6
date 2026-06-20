@@ -338,13 +338,25 @@ async function clickFacebookPostButton(page, dialogSel) {
   let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
   if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
   if (!clicked) {
-    clicked = await page.evaluate((selector) => {
-      const dialog = document.querySelector(selector) || document;
+    clicked = await page.evaluate(() => {
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = window.getComputedStyle(el);
         return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
       };
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+      const scored = dialogs.map((dialog, index) => {
+        const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible).length;
+        const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+          const label = (btn.getAttribute('aria-label') || '').trim();
+          const body = (btn.innerText || btn.textContent || '').trim();
+          return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+        });
+        const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+        return { dialog, index, textboxes, hasPost, z: Number.isFinite(z) ? z : 0 };
+      }).filter((item) => item.textboxes > 0 || item.hasPost)
+        .sort((a, b) => ((a.hasPost ? 1 : 0) - (b.hasPost ? 1 : 0)) || (a.textboxes - b.textboxes) || (a.z - b.z) || (a.index - b.index));
+      const dialog = scored.length ? scored[scored.length - 1].dialog : (dialogs[dialogs.length - 1] || document);
       const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
       const btn = buttons.reverse().find((el) => visible(el)
         && el.getAttribute('aria-disabled') !== 'true'
@@ -352,7 +364,7 @@ async function clickFacebookPostButton(page, dialogSel) {
       if (!btn) return false;
       btn.click();
       return true;
-    }, dialogSel).catch(() => false);
+    }).catch(() => false);
   }
   if (!clicked) {
     console.error('[Facebook] Click Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
