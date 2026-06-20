@@ -343,12 +343,16 @@ async function getFacebookTextComposerLocator(page) {
         return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
+      const looksLikePhotoViewer = /cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText);
+      if (looksLikePhotoViewer && !looksLikeComposer) return;
       const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]'));
       textboxes.forEach((textbox, textboxIndex) => {
         if (!visible(textbox)) return;
         const label = `${textbox.getAttribute('aria-label') || ''} ${textbox.getAttribute('aria-placeholder') || ''} ${textbox.getAttribute('placeholder') || ''}`;
         const combined = `${label} ${dialogText}`;
         if (/search|comment|reply|message/i.test(label)) return;
+        if (!hasPost && !looksLikeComposer) return;
         const rect = textbox.getBoundingClientRect();
         let score = 0;
         if (hasPost) score += 80;
