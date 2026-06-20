@@ -4,6 +4,52 @@ const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
+const X_MAX_CHARS = 280;
+const X_SAFE_CHARS = 245;
+
+function xLength(value) {
+  return Array.from(String(value || '').replace(/\r\n/g, '\n')).length;
+}
+
+function trimToXLimit(value, limit = X_SAFE_CHARS) {
+  const chars = Array.from(String(value || '').trim());
+  if (chars.length <= limit) return chars.join('');
+  const hard = chars.slice(0, Math.max(0, limit - 1)).join('');
+  const soft = hard.replace(/\s+\S{0,24}$/, '').trim();
+  return `${(soft.length >= 80 ? soft : hard).trim()}…`;
+}
+
+function formatXHashtags(hashtags = []) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(hashtags) ? hashtags : []) {
+    const tag = String(raw || '').trim().replace(/^#+/, '').replace(/[^\p{L}\p{N}_]/gu, '');
+    if (!tag || seen.has(tag.toLowerCase())) continue;
+    seen.add(tag.toLowerCase());
+    out.push(`#${tag}`);
+  }
+  return out;
+}
+
+function buildXPostText(description, hashtags = []) {
+  const desc = String(description || '').replace(/\s+/g, ' ').trim();
+  const tags = formatXHashtags(hashtags);
+  const fittingTags = [];
+  for (const tag of tags) {
+    const candidateTags = fittingTags.concat(tag).join(' ');
+    if (xLength(candidateTags) <= 80) fittingTags.push(tag);
+  }
+  let tagLine = fittingTags.join(' ');
+  while (tagLine && xLength(tagLine) > X_SAFE_CHARS) {
+    fittingTags.pop();
+    tagLine = fittingTags.join(' ');
+  }
+  if (!desc) return trimToXLimit(tagLine, X_SAFE_CHARS);
+  const separator = tagLine ? '\n\n' : '';
+  const descLimit = X_SAFE_CHARS - xLength(separator) - xLength(tagLine);
+  const safeDesc = trimToXLimit(desc, Math.max(40, descLimit));
+  return trimToXLimit(`${safeDesc}${separator}${tagLine}`.trim(), X_SAFE_CHARS);
+}
 
 function handleFromXUrl(raw) {
   if (!raw) return null;
@@ -42,6 +88,14 @@ async function getMyHandle(page) {
 
 async function insertXText(page, textArea, text) {
   await textArea.click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  await page.evaluate(() => {
+    const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+    if (!el) return;
+    el.textContent = '';
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null }));
+  }).catch(() => {});
   const inserted = await page.evaluate((value) => {
     const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
     if (!el) return false;
@@ -52,6 +106,31 @@ async function insertXText(page, textArea, text) {
     return ok || Boolean((el.innerText || el.textContent || '').trim());
   }, text).catch(() => false);
   if (!inserted) await page.keyboard.insertText(text);
+}
+
+async function ensureXTextWithinLimit(page, textArea, desiredText) {
+  let safeText = trimToXLimit(desiredText, X_SAFE_CHARS);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await page.evaluate(() => {
+      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+      const text = (el?.innerText || el?.textContent || '').trim();
+      const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+        .map((n) => (n.innerText || n.textContent || '').trim())
+        .filter(Boolean)
+        .join(' | ')
+        .slice(0, 500);
+      return { text, problem };
+    }).catch(() => ({ text: '', problem: '' }));
+    const over = String(state.problem || '').match(/exceeded the character limit by\s+(\d+)/i);
+    if (xLength(state.text) <= X_MAX_CHARS && !over && !/upgrade to premium to write longer posts|character limit/i.test(state.problem || '')) {
+      return safeText;
+    }
+    const reduceBy = over ? Number(over[1]) + 8 : Math.max(8, xLength(state.text) - X_SAFE_CHARS + 8);
+    safeText = trimToXLimit(safeText, Math.max(40, xLength(safeText) - reduceBy));
+    await insertXText(page, textArea, safeText);
+    await page.waitForTimeout(500);
+  }
+  return safeText;
 }
 
 async function getXPostButton(page) {
@@ -87,8 +166,12 @@ async function getXMediaState(page) {
     const previews = Array.from(composer.querySelectorAll([
       '[data-testid="attachments"] img',
       '[data-testid="attachments"] video',
+      '[data-testid="attachments"] [aria-label*="Image" i]',
+      '[data-testid="attachments"] [aria-label*="Photo" i]',
+      '[data-testid="attachments"] [style*="background-image"]',
       'img[src^="blob:"]',
       'video[src^="blob:"]',
+      '[style*="blob:"]',
       '[role="img"][aria-label*="Image" i]',
     ].join(','))).filter(visible).length;
     const busy = Array.from(composer.querySelectorAll([
@@ -98,12 +181,13 @@ async function getXMediaState(page) {
       '[aria-label*="Processing" i]',
       '[data-testid*="progress" i]',
     ].join(','))).some(visible);
+    const text = (composer.innerText || composer.textContent || '').slice(0, 1000);
     const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
       .map((n) => (n.innerText || n.textContent || '').trim())
       .filter(Boolean)
       .join(' | ')
       .slice(0, 400);
-    return { previews, busy, problem };
+    return { previews, busy, problem: [problem, text].filter(Boolean).join(' | ').slice(0, 700) };
   }).catch(() => ({ previews: 0, busy: false, problem: '' }));
 }
 
@@ -120,7 +204,7 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
     }
     const postEnabled = await isXPostButtonEnabled(page).catch(() => false);
     const hasExpectedPreview = state.previews >= Math.min(expectedCount, X_MAX_IMAGES);
-    const readyEnough = postEnabled && !state.busy && (hasExpectedPreview || state.previews > 0);
+    const readyEnough = postEnabled && !state.busy && hasExpectedPreview;
     if (readyEnough) {
       if (!stableReadySince) stableReadySince = Date.now();
       if (Date.now() - stableReadySince >= 2500) return true;
@@ -198,6 +282,42 @@ async function extractXStatusUrl(page) {
   }).catch(() => null);
 }
 
+function xUrlFromCreateTweetPayload(payload, fallbackHandle) {
+  const create = payload?.data?.create_tweet || payload?.data?.createTweet || payload?.create_tweet;
+  const result = create?.tweet_results?.result || create?.tweet?.result || create?.tweet || null;
+  const id = result?.rest_id || result?.legacy?.id_str || result?.tweet?.rest_id || result?.tweet?.legacy?.id_str;
+  const handle = result?.core?.user_results?.result?.legacy?.screen_name
+    || result?.core?.user_results?.result?.screen_name
+    || fallbackHandle;
+  if (id && handle) return `https://x.com/${handle}/status/${id}`;
+  return null;
+}
+
+function waitForXCreateTweetResponse(page, fallbackHandle, timeout = 90000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      page.off('response', onResponse);
+      resolve(value || null);
+    };
+    const timer = setTimeout(() => finish(null), timeout);
+    const onResponse = async (response) => {
+      const url = response.url();
+      if (!/CreateTweet|graphql/i.test(url)) return;
+      if (response.status() >= 400) return;
+      try {
+        const json = await response.json();
+        const direct = xUrlFromCreateTweetPayload(json, fallbackHandle);
+        if (direct) return finish(direct);
+      } catch {}
+    };
+    page.on('response', onResponse);
+  });
+}
+
 async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -205,6 +325,7 @@ async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
     if (statusUrl) return { confirmed: true, url: statusUrl };
     const stillVisible = await textArea.isVisible().catch(() => false);
     const toast = await visibleXProblemText(page);
+    if (/exceeded the character limit|upgrade to premium to write longer posts/i.test(toast)) return { confirmed: false, error: toast };
     if (/failed|error|try again|could not|something went wrong/i.test(toast)) return { confirmed: false, error: toast };
     if (!stillVisible || /your post was sent|posted|view/i.test(toast)) return { confirmed: true, url: null };
     await page.waitForTimeout(750);
@@ -278,12 +399,14 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     const textArea = page.locator('div[role="textbox"][data-testid^="tweetTextarea"]').first();
     await textArea.waitFor({ state: 'visible', timeout: 30000 });
 
-    const fullText = hashtags.length
-      ? `${description || ''}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
-      : (description || '');
+    const fullText = buildXPostText(description || '', hashtags);
+    if (xLength(fullText) > X_MAX_CHARS) {
+      throw new Error('X text could not be shortened under the 280 character limit. Leaving source files for retry.');
+    }
 
     await insertXText(page, textArea, fullText);
     await page.waitForTimeout(1000);
+    const postedText = await ensureXTextWithinLimit(page, textArea, fullText);
 
     if (xImageFiles.length) {
       const fileInput = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"]').first();
@@ -292,7 +415,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         await attach.click({ trial: true }).catch(() => {});
         await fileInput.setInputFiles(xImageFiles);
       });
-      await page.locator('[data-testid="attachments"] img, [data-testid="attachments"] video, img[src^="blob:"], video[src^="blob:"]').first()
+      await page.locator('[data-testid="attachments"] img, [data-testid="attachments"] video, [data-testid="attachments"] [style*="background-image"], img[src^="blob:"], video[src^="blob:"], [style*="blob:"]').first()
         .waitFor({ state: 'visible', timeout: 45000 });
       await waitForXMediaReady(page, xImageFiles.length, 120000);
     }
@@ -302,17 +425,20 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     let lastError = '';
     for (let attempt = 0; attempt < 4 && !confirmed; attempt++) {
       await dismissOverlayBlockingFlow(page, { logPrefix: '[X]', clickBackground: false }).catch(() => {});
+      const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000);
+      const responseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
       confirmed = result.confirmed;
-      publishedUrl = result.url || publishedUrl;
+      publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
       if (!confirmed) {
         await textArea.click().catch(() => {});
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
         result = await waitForXPublishConfirmation(page, textArea, 15000);
+        const shortcutResponseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
         confirmed = result.confirmed;
-        publishedUrl = result.url || publishedUrl;
+        publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
         lastError = result.error || lastError;
       }
       if (!confirmed) await page.waitForTimeout(1500);
@@ -323,7 +449,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
     }
 
-    const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, fullText);
+    const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, postedText);
     if (!/\/status\/\d+/.test(finalUrl)) {
       throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
     }

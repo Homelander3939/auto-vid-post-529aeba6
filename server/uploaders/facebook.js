@@ -17,7 +17,8 @@ function normalizeFacebookPermalink(raw) {
   const owner = url.searchParams.get('id');
   const origin = 'https://www.facebook.com';
   if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
-  if (/\/(?:posts|videos|reel|watch)\//i.test(path)
+  if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(path)
+    || /\/[^/]+\/permalink\//i.test(path)
     || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(path)
     || /\/permalink\.php$/i.test(path)
     || /\/story\.php$/i.test(path)
@@ -61,6 +62,70 @@ function extractFacebookPermalinkFromText(raw) {
   return null;
 }
 
+function extractFacebookPermalinkFromPayload(payload) {
+  const seen = new Set();
+  const visit = (value) => {
+    if (value == null) return null;
+    if (typeof value === 'string') {
+      return normalizeFacebookPermalink(value) || extractFacebookPermalinkFromText(value);
+    }
+    if (typeof value !== 'object' || seen.has(value)) return null;
+    seen.add(value);
+    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href']) {
+      const found = visit(value[key]);
+      if (found) return found;
+    }
+    const combinedPostId = String(value.post_id || value.postID || value.legacy_story_hideable_id || '').match(/^(\d+)_(\d+)$/);
+    if (combinedPostId) {
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(combinedPostId[2])}&id=${encodeURIComponent(combinedPostId[1])}`;
+    }
+    const storyId = value.story_fbid || value.fbid || value.post_id || value.postID || value.legacy_story_hideable_id;
+    const ownerId = value.actor_id || value.page_id || value.profile_id || value.owner_id || value.id;
+    if (storyId && ownerId && String(storyId) !== String(ownerId)) {
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(String(storyId))}&id=${encodeURIComponent(String(ownerId))}`;
+    }
+    for (const item of Array.isArray(value) ? value : Object.values(value)) {
+      const found = visit(item);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(payload);
+}
+
+function waitForFacebookCreatePostResponse(page, timeout = 90000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      page.off('response', onResponse);
+      resolve(value || null);
+    };
+    const timer = setTimeout(() => finish(null), timeout);
+    const onResponse = async (response) => {
+      const url = response.url();
+      if (!/(\/api\/graphql|\/graphql|composer|ufi\/post|create)/i.test(url)) return;
+      if (response.status() >= 400) return;
+      try {
+        const body = await response.text();
+        const fromText = extractFacebookPermalinkFromText(body);
+        if (fromText) return finish(fromText);
+        const cleaned = body.replace(/^for \(;;\);/, '').trim();
+        const chunks = cleaned.split(/\n+/).filter(Boolean);
+        for (const chunk of chunks) {
+          try {
+            const found = extractFacebookPermalinkFromPayload(JSON.parse(chunk));
+            if (found) return finish(found);
+          } catch {}
+        }
+      } catch {}
+    };
+    page.on('response', onResponse);
+  });
+}
+
 async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout = 120000) {
   if (!expectedCount) return;
   const deadline = Date.now() + timeout;
@@ -101,7 +166,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const id = u.searchParams.get('id');
         const origin = 'https://www.facebook.com';
         if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
-        if (/\/(?:posts|videos|reel|watch)\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
+        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
           for (const key of ['story_fbid', 'fbid', 'id']) {
             const value = u.searchParams.get(key);
@@ -297,6 +362,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     if (stillDisabled === 'true') {
       throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
     }
+    const createPostPromise = waitForFacebookCreatePostResponse(page, 90000);
     await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
 
     // Wait for dialog to close (post published) — real success signal
@@ -309,9 +375,10 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
         throw new Error('Facebook did not confirm the post (composer still open). Leaving source files for retry.');
       }
     }
-    await page.waitForTimeout(3500);
+    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(8000).then(() => null)]).catch(() => null);
+    await page.waitForTimeout(1500);
 
-    return { url: await resolvePostedFacebookUrl(page, targetUrl, fullText) };
+    return { url: responsePermalink || await resolvePostedFacebookUrl(page, targetUrl, fullText) };
   } finally {
     await safeClose(context);
   }
