@@ -973,7 +973,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await verifyFacebookComposerHasText(page, dialogSel, fullText);
     await verifyFacebookComposerHasMedia(page, imageFiles.length);
-    await clickFacebookPostButton(page, dialogSel);
+    await clickFacebookVerifiedPostButton(page, dialogSel, fullText, imageFiles.length);
 
     // Wait for the composer/spinner to fully finish. Facebook Page posts can
     // keep rolling for several minutes; do not close or resolve early.
