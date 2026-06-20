@@ -310,6 +310,34 @@ async function extractFacebookPermalinkFromPageSource(page) {
   return extractFacebookPermalinkFromText(html);
 }
 
+async function fetchRecentFacebookPermalinks(page, targetUrl = null, limit = 8, settleMs = 2500) {
+  const scanUrl = targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)
+    ? targetUrl
+    : 'https://www.facebook.com/me';
+  await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  const hrefs = await page.evaluate((maxItems) => {
+    const articles = Array.from(document.querySelectorAll('[role="article"]'));
+    const roots = articles.length ? articles.slice(0, maxItems) : [document.body];
+    const out = [];
+    const seen = new Set();
+    for (const root of roots) {
+      for (const a of Array.from(root.querySelectorAll('a[href]'))) {
+        const href = a.getAttribute('href') || '';
+        if (!/story_fbid=|fbid=|\/posts\/|\/permalink\.php|\/story\.php|\/photo\.php|\/videos?\/|\/reel\/|\/groups\/[^/]+\/(?:posts|permalink)\/|\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(href)) continue;
+        if (/comment|reaction|profile\.php\?id=|\/friends\//i.test(href)) continue;
+        const absolute = href.startsWith('http') ? href : `https://www.facebook.com${href}`;
+        if (seen.has(absolute)) continue;
+        seen.add(absolute);
+        out.push(absolute);
+        if (out.length >= maxItems) return out;
+      }
+    }
+    return out;
+  }, limit).catch(() => []);
+  return Array.from(new Set((Array.isArray(hrefs) ? hrefs : []).map(normalizeFacebookPermalink).filter(Boolean)));
+}
+
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const articles = page.locator('[role="article"]');
   const count = Math.min(await articles.count().catch(() => 0), 5);
@@ -349,9 +377,14 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   return null;
 }
 
-async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
+async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', baselineUrls = []) {
+  const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
+  const fresh = (url) => {
+    const normalized = normalizeFacebookPermalink(url);
+    return normalized && !baselineSet.has(normalized) ? normalized : null;
+  };
   const direct = normalizeFacebookPermalink(page.url());
-  if (direct) return direct;
+  if (direct && !baselineSet.has(direct)) return direct;
 
   const confirmationLink = await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('a[href]'));
@@ -363,13 +396,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
     }
     return null;
   }).catch(() => null);
-  const fromConfirmation = normalizeFacebookPermalink(confirmationLink);
+  const fromConfirmation = fresh(confirmationLink);
   if (fromConfirmation) return fromConfirmation;
 
   await page.waitForTimeout(2500);
-  const copied = await copyFacebookLinkFromTopArticle(page, snippet);
+  const copied = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
   if (copied) return copied;
-  const onCurrentPage = await extractFacebookPermalinkFromArticles(page, snippet);
+  const onCurrentPage = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
   if (onCurrentPage) return onCurrentPage;
 
   const urlsToScan = [];
@@ -379,10 +412,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     for (let attempt = 0; attempt < 5; attempt++) {
       await page.waitForTimeout(3000 + attempt * 1500);
-      const copiedAfterNav = await copyFacebookLinkFromTopArticle(page, snippet);
+      const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
-      const permalink = await extractFacebookPermalinkFromArticles(page, snippet);
+      const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
       if (permalink) return permalink;
+      const recent = await fetchRecentFacebookPermalinks(page, scanUrl, 8, 1000).catch(() => []);
+      const newRecent = recent.find((url) => !baselineSet.has(url));
+      if (newRecent) return newRecent;
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     }
   }
@@ -405,6 +441,10 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     if (url.includes('/login')) {
       throw new Error('Facebook requires login. Use Prepare in Settings to log in once.');
     }
+
+    const baselinePermalinks = await fetchRecentFacebookPermalinks(page, targetUrl, 8, 1500).catch(() => []);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1500);
 
     const fullText = hashtags.length
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
@@ -474,10 +514,12 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(30000).then(() => null)]).catch(() => null);
     await page.waitForTimeout(1500);
 
-    const finalUrl = responsePermalink
-      || await resolvePostedFacebookUrl(page, targetUrl, fullText).catch(async (e) => {
-        const fromSource = await extractFacebookPermalinkFromPageSource(page);
-        if (fromSource) return fromSource;
+    const baselineSet = new Set(baselinePermalinks);
+    const normalizedResponsePermalink = normalizeFacebookPermalink(responsePermalink);
+    const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
+      || await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(async (e) => {
+        const fromSource = normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
+        if (fromSource && !baselineSet.has(fromSource)) return fromSource;
         console.error('[Facebook] Link resolution diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
         throw e;
       });

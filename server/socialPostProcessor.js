@@ -11,6 +11,15 @@ const { getBrowserProfileForAccount, getJobAccountSelections } = require('./brow
 const uploaders = { x: uploadToX, facebook: uploadToFacebook, linkedin: uploadToLinkedIn, tiktok: uploadToTikTokPost };
 
 const processing = new Set();
+const SOURCE_IMAGE_RE = /\.(jpe?g|png|webp)$/i;
+
+function normalizeLocalFolderPath(folder) {
+  return String(folder || '')
+    .replace(/^\[folder(?:\|\d+(?:\|\d+)?)?\]\s*/i, '')
+    .replace(/^"(.+)"$/, '$1')
+    .replace(/^'(.+)'$/, '$1')
+    .trim();
+}
 
 function cleanTelegramText(value, max = 900) {
   return String(value || '')
@@ -67,16 +76,31 @@ function cleanupSourceFiles(sourceMeta, shouldClean) {
   if (!src.folder || !Array.isArray(src.files) || !src.files.length) {
     return shouldClean ? '\n\n🧹 No local source-file metadata was available, so no source files were removed.' : '';
   }
+  const folder = normalizeLocalFolderPath(src.folder);
 
   if (!shouldClean) {
-    return `\n\n🧹 Source files kept for retry in ${cleanTelegramText(src.folder, 120)} because not every selected platform confirmed successfully.`;
+    return `\n\n🧹 Source files kept in ${cleanTelegramText(folder || src.folder, 120)} because no selected platform confirmed successfully.`;
   }
+
+  const names = new Set(src.files.map((name) => path.basename(String(name || ''))).filter(Boolean));
+  try {
+    const entries = fs.readdirSync(folder);
+    const manifestStems = Array.from(names)
+      .filter((name) => name.toLowerCase().endsWith('.txt'))
+      .map((name) => name.replace(/\.[^.]+$/, '').toLowerCase());
+    for (const entry of entries) {
+      const lower = entry.toLowerCase();
+      if (SOURCE_IMAGE_RE.test(entry) && manifestStems.some((stem) => lower.startsWith(stem))) {
+        names.add(entry);
+      }
+    }
+  } catch {}
 
   const removed = [];
   const failed = [];
   const missing = [];
-  for (const name of src.files) {
-    const full = path.join(src.folder, name);
+  for (const name of names) {
+    const full = path.join(folder, name);
     try {
       if (!fs.existsSync(full)) { missing.push(name); continue; }
       fs.unlinkSync(full);
@@ -87,11 +111,11 @@ function cleanupSourceFiles(sourceMeta, shouldClean) {
     }
   }
 
-  let line = `\n\n🧹 Cleanup checked ${src.files.length} source file(s) in ${cleanTelegramText(src.folder, 120)}.`;
+  let line = `\n\n🧹 Cleanup checked ${names.size} source file(s) in ${cleanTelegramText(folder, 120)}.`;
   if (removed.length) line += ` Removed ${removed.length}: ${cleanTelegramText(removed.join(', '), 220)}.`;
   else line += ' Removed 0.';
   if (missing.length) line += ` Missing ${missing.length}: ${cleanTelegramText(missing.join(', '), 180)}.`;
-  if (removed.length) console.log(`[SocialPosts] Removed ${removed.length} source file(s) from ${src.folder}`);
+  if (removed.length) console.log(`[SocialPosts] Removed ${removed.length} source file(s) from ${folder}`);
   if (failed.length) line += `\n⚠️ Could not delete ${failed.length}: ${cleanTelegramText(failed.join(', '), 240)}`;
   return line;
 }
@@ -246,9 +270,10 @@ async function processSocialPost(supabase, postId, notify) {
     // Cleanup must not depend on Telegram delivery. If at least one platform posted,
     // remove the source bundle so folder schedules behave like video uploads.
     const cleanupMeta = post.source_meta || await inferSourceMeta(supabase, post);
-    // Only clear source files after every selected platform is confirmed. In a
-    // partial run, keeping them lets failed platforms (like X) be retried.
-    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0 && errorCount === 0);
+    // Once any platform has a confirmed post URL, remove the local source bundle
+    // so the folder/importer cannot repost it. Failed platforms can still be
+    // retried from the stored social_posts image paths.
+    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0);
 
     if (notify) {
       try {
