@@ -104,16 +104,21 @@ async function insertXText(page, textArea, text) {
   await textArea.click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
-  await page.evaluate(() => {
-    const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
-    if (!el) return;
+  await textArea.evaluate((el) => {
     el.textContent = '';
+    el.innerHTML = '';
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.execCommand('delete', false);
     el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null }));
   }).catch(() => {});
-  const inserted = await page.evaluate((value) => {
-    const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
-    if (!el) return false;
+  const inserted = await textArea.evaluate((el, value) => {
     el.focus();
+    el.textContent = '';
+    el.innerHTML = '';
     const ok = document.execCommand('insertText', false, value || '');
     el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
