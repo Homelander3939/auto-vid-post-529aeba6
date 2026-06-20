@@ -141,6 +141,14 @@ function normalisePlatform(p: string): string | null {
   return null;
 }
 
+// Strip useless baked-in prefixes like "TechPulse: 1. Gaming:" from manifest text.
+function stripTechPulsePrefix(text: string): string {
+  return String(text || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:]+\s*:\s*/, '')
+    .trim();
+}
+
 // Build text per platform from parsed sections.
 // LinkedIn + Facebook share LINKEDIN_FACEBOOK_POST.
 // X uses X_THREAD_OR_LONG_POST.
@@ -170,9 +178,9 @@ function buildPlatformTexts(
       }).join('\n')
     : '';
 
-  const liFinal = (liPost || liFb || fallbackBody || '').trim();
-  const fbFinal = (fbPost || liFb || fallbackBody || '').trim();
-  const xFinal = (xPost || xLegacy || fallbackXBody || fallbackBody || '').trim();
+  const liFinal = stripTechPulsePrefix((liPost || liFb || fallbackBody || '').trim());
+  const fbFinal = stripTechPulsePrefix((fbPost || liFb || fallbackBody || '').trim());
+  const xFinal = stripTechPulsePrefix((xPost || xLegacy || fallbackXBody || fallbackBody || '').trim());
   const hasExplicitX = !!(xPost || xLegacy);
   const hasExplicitLi = !!(liPost || liFb);
   const hasExplicitFb = !!(fbPost || liFb);

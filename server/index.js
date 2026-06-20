@@ -1934,6 +1934,15 @@ function normalizePlatformName(p) {
   return null;
 }
 
+// Strip useless baked-in prefixes like "TechPulse: 1. Gaming:" from manifest text.
+// These prefixes waste characters (especially on X) and add no value.
+function stripTechPulsePrefix(text) {
+  return String(text || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:]+\s*:\s*/, '')
+    .trim();
+}
+
 // Scan a folder, return parsed bundles. Each entry includes raw image bytes so
 // the caller can either base64-encode them (browser scan) or upload them to
 // Supabase storage (recurring schedule processor).
@@ -1961,8 +1970,8 @@ function scanLocalBundles(folderPath) {
         }).join('\n')
       : '';
     const texts = {};
-    if (liFb) { texts.linkedin = (liFb + tail).trim(); texts.facebook = (liFb + tail).trim(); }
-    if (xText) texts.x = xText.trim();
+    if (liFb) { texts.linkedin = stripTechPulsePrefix(liFb + tail); texts.facebook = stripTechPulsePrefix(liFb + tail); }
+    if (xText) texts.x = stripTechPulsePrefix(xText);
     // Auto-discover images by filename prefix when manifest doesn't list them.
     // Bundles like `2026-05-08-morning-post-01.txt` ↔
     // `2026-05-08-morning-post-01-story-01-*.jpg`.
