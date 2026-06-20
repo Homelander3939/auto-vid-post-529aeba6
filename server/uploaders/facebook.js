@@ -1110,10 +1110,14 @@ async function clickFacebookBasicEntry(page, needsMedia = false) {
       .map((el) => {
         const text = (el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
         const href = el.getAttribute('href') || '';
+        const haystack = `${text} ${href}`;
         let score = 0;
-        if (wantMedia && /photo|image|video|media|add photos/i.test(`${text} ${href}`)) score += 80;
-        if (/create post|write something|what.*mind|publish|post|status|composer/i.test(`${text} ${href}`)) score += 50;
-        if (/search|comment|reply|message|like|follow|share this/i.test(text)) score -= 100;
+        if (/composer|mbasic\/composer|create post|write something|what.*mind|publish|status update|status composer/i.test(haystack)) score += 90;
+        if (/\bpost\b/i.test(text) && !/posts\/|photos?\/|profile picture|cover/i.test(haystack)) score += 35;
+        // Photo/profile/cover links on mbasic often open galleries or cover-image
+        // viewers, not the post composer. File upload is handled only after a
+        // composer/form is open, so never use these as entry points.
+        if (/cover|profile picture|avatar|photo viewer|view photo|photos?\b|video|image|media|story|reel|album|timeline photos|uploads|search|comment|reply|message|like|follow|share this/i.test(haystack)) score -= 140;
         return { el, score };
       })
       .filter((item) => item.score > 0)
