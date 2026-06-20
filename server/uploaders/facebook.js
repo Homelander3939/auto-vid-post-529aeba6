@@ -527,6 +527,53 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   }, snippet).catch(() => null);
 }
 
+async function openFreshFacebookArticleAndReadUrl(page, snippet = '', baselineUrls = []) {
+  const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const clicked = await page.evaluate((rawSnippet) => {
+      const normalizeText = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const wanted = normalizeText(rawSnippet).slice(0, 70);
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const articles = Array.from(document.querySelectorAll('[role="article"]')).slice(0, 8);
+      const scored = articles.map((article, index) => {
+        const text = article.innerText || article.textContent || '';
+        const body = normalizeText(text);
+        const textMatch = wanted && body.includes(wanted.slice(0, Math.min(35, wanted.length)));
+        const fresh = /\b(just now|now|\d+\s*(m|min|mins|minute|minutes))\b/i.test(text);
+        return { article, score: (textMatch ? 20 : 0) + (fresh ? 8 : 0) - index };
+      }).filter((item) => item.score > -4).sort((a, b) => b.score - a.score);
+      for (const { article } of scored) {
+        const anchors = Array.from(article.querySelectorAll('a[href]')).filter(visible);
+        const preferred = anchors.find((a) => /story_fbid=|fbid=|\/posts\/|\/permalink\.php|\/story\.php|\/photo\.php|\/share\/|\/shares?\//i.test(a.getAttribute('href') || ''))
+          || anchors.find((a) => /just now|now|\d+\s*(m|min|mins|minute|minutes)|hour|yesterday|at/i.test((a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim()));
+        if (preferred) {
+          preferred.scrollIntoView({ block: 'center', inline: 'center' });
+          preferred.click();
+          return true;
+        }
+      }
+      window.scrollBy(0, Math.round(window.innerHeight * 0.8));
+      return false;
+    }, snippet).catch(() => false);
+    if (clicked) {
+      await page.waitForTimeout(3500);
+      const direct = normalizeFacebookPermalink(page.url());
+      if (direct && !baselineSet.has(direct)) return direct;
+      const fromSource = normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
+      if (fromSource && !baselineSet.has(fromSource)) return fromSource;
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+    } else {
+      await page.waitForTimeout(1500);
+    }
+  }
+  return null;
+}
+
 async function extractFacebookPermalinkFromPageSource(page) {
   const html = await page.content().catch(() => '');
   return extractFacebookPermalinkFromText(html);
@@ -696,6 +743,8 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
       if (permalink) return permalink;
+      const opened = fresh(await openFreshFacebookArticleAndReadUrl(page, snippet, baselinePermalinks));
+      if (opened) return opened;
       const recent = await fetchRecentFacebookPermalinks(page, scanUrl, 8, 1000).catch(() => []);
       const newRecent = recent.find((url) => !baselineSet.has(url));
       if (newRecent) return newRecent;
