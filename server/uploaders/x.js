@@ -484,7 +484,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000);
-      const responseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
+      const responseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
       confirmed = result.confirmed;
       publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
@@ -492,7 +492,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         await textArea.click().catch(() => {});
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
         result = await waitForXPublishConfirmation(page, textArea, 15000);
-        const shortcutResponseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
+        const shortcutResponseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
         confirmed = result.confirmed;
         publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
         lastError = result.error || lastError;
@@ -502,11 +502,13 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
 
     if (!confirmed) {
       const errToast = lastError || await visibleXProblemText(page);
+      console.error('[X] Publish diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
     }
 
     const finalUrl = publishedUrl || await resolvePostedXUrl(page, myHandle, postedText);
     if (!/\/status\/\d+/.test(finalUrl)) {
+      console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error('X post not visible on profile after publish. Treating as failure to avoid wrong link.');
     }
     return { url: finalUrl };
