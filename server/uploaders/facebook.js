@@ -229,7 +229,7 @@ async function getFacebookComposerDialogIndex(page) {
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
       return { index, textboxes, hasPost, z: Number.isFinite(z) ? z : 0 };
@@ -266,7 +266,7 @@ async function getFacebookTextComposerLocator(page) {
       const hasPost = buttons.some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
       const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]'));
@@ -313,7 +313,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && /^(post|publish|share)$/i.test(label || body);
       });
       for (const textbox of Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible)) {
         const text = normalize(textbox.innerText || textbox.textContent || '');
@@ -342,7 +342,7 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
-        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       if (!hasPost) return;
       const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
