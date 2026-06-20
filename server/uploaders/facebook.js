@@ -75,6 +75,10 @@ function extractFacebookPermalinkFromPayload(payload) {
       const found = visit(value[key]);
       if (found) return found;
     }
+    const combinedPostId = String(value.post_id || value.postID || value.legacy_story_hideable_id || '').match(/^(\d+)_(\d+)$/);
+    if (combinedPostId) {
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(combinedPostId[2])}&id=${encodeURIComponent(combinedPostId[1])}`;
+    }
     const storyId = value.story_fbid || value.fbid || value.post_id || value.postID || value.legacy_story_hideable_id;
     const ownerId = value.actor_id || value.page_id || value.profile_id || value.owner_id || value.id;
     if (storyId && ownerId && String(storyId) !== String(ownerId)) {
