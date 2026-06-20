@@ -296,7 +296,7 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
 }
 
 async function getFacebookPostButton(page, dialogSel) {
-  const activeDialog = await getActiveFacebookDialogLocator(page);
+  const activeDialog = await getFacebookComposerDialogLocator(page);
   const groups = [
     activeDialog.locator('[aria-label="Post"][role="button"]'),
     activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
@@ -712,31 +712,16 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(2000);
     }
 
-    await insertFacebookTextIntoActiveComposer(page, fullText);
-
-    // Do not press Escape here: on Facebook it can close the composer/draft
-    // instead of only closing hashtag autocomplete. We keep the dialog open and
-    // click the scoped Post button directly.
-    await page.waitForTimeout(300);
-
     if (imageFiles.length) {
-      // Try direct file input first (works even when popover is open)
-      const fileInput = page.locator('input[type="file"][accept*="image"]').first();
-      let attached = await fileInput.setInputFiles(imageFiles).then(() => true).catch(() => false);
-      if (!attached) {
-        await page.locator(`${dialogSel} [aria-label="Photo/video"], ${dialogSel} [aria-label*="Photo" i]`).first().click().catch(() => {});
-        await page.waitForTimeout(1500);
-        await fileInput.setInputFiles(imageFiles).catch(() => {});
-      }
-      await waitForFacebookMediaReady(page, dialogSel, imageFiles.length, 120000);
+      await attachImagesToFacebookComposer(page, imageFiles, dialogSel);
     }
 
+    await insertFacebookTextIntoActiveComposer(page, fullText);
     await page.waitForTimeout(400);
 
-    // Some Facebook Page/media flows open a second composer over the original.
-    // Always advance the topmost dialog, then re-commit text into that active composer
-    // before clicking Post so the final post cannot become image-only.
-    await clickFacebookNextSteps(page, 4);
+    // Some Facebook media flows open a temporary editor over the real composer.
+    // After media is attached/confirmed, write text only into the dialog that has
+    // the final Post button so suggestions/edit overlays cannot steal the post.
     await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
