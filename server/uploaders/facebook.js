@@ -434,6 +434,10 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
 
 async function getFacebookPostButton(page, dialogSel) {
   const activeDialog = await getFacebookComposerDialogLocator(page);
+  return getFacebookPostButtonInDialog(page, activeDialog, dialogSel);
+}
+
+async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel) {
   const groups = [
     activeDialog.locator('[aria-label="Post"][role="button"]'),
     activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
