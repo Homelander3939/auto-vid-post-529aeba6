@@ -437,13 +437,13 @@ async function getFacebookPostButton(page, dialogSel) {
   return getFacebookPostButtonInDialog(page, activeDialog, dialogSel);
 }
 
-async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel) {
+async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel, { allowGlobalFallback = true } = {}) {
   const groups = [
     activeDialog.locator('[aria-label="Post"][role="button"]'),
     activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
     activeDialog.locator('[aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")'),
-    page.getByRole('button', { name: /^Post$/ }),
   ];
+  if (allowGlobalFallback) groups.push(page.getByRole('button', { name: /^Post$/ }));
   let fallback = null;
   for (const buttons of groups) {
     const count = await buttons.count().catch(() => 0);
@@ -459,7 +459,10 @@ async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel) {
       fallback = fallback || btn;
     }
   }
-  return fallback || page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
+  if (fallback) return fallback;
+  return allowGlobalFallback
+    ? page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last()
+    : activeDialog.locator('[aria-label="Post"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), [aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")').last();
 }
 
 async function clickFacebookPostButton(page, dialogSel) {
@@ -520,7 +523,7 @@ async function clickFacebookVerifiedPostButton(page, dialogSel, expectedText, ex
     throw new Error('Facebook final composer did not contain both text and media before posting. Leaving source files for retry.');
   }
   const dialog = page.locator('div[role="dialog"]').nth(readyIndex);
-  const postBtn = await getFacebookPostButtonInDialog(page, dialog, dialogSel);
+  const postBtn = await getFacebookPostButtonInDialog(page, dialog, dialogSel, { allowGlobalFallback: false });
   await postBtn.waitFor({ state: 'visible', timeout: 20000 });
   for (let i = 0; i < 45; i++) {
     const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
