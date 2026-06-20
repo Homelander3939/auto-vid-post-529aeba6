@@ -236,7 +236,18 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
     if (!(await dialog.isVisible().catch(() => false))) return step > 0;
-    const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], [aria-label="Share"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish"), div[role="button"]:has-text("Share")').first().isVisible().catch(() => false);
+    const postVisible = await dialog.evaluate((root) => {
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      return Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(name) && /^(post|publish|share)$/i.test(name);
+      });
+    }).catch(() => false);
     if (postVisible) return step > 0;
     const expected = normalizePostText(expectedText).slice(0, 45);
     if (expected) {
@@ -254,6 +265,11 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
       const text = (root.innerText || root.textContent || '').trim();
       const hasExpectedText = expectedNeedle && normalize(text).includes(expectedNeedle);
       if (hasExpectedText) return false;
+      const hasReadyPostBtn = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(name) && /^(post|publish|share)$/i.test(name);
+      });
+      if (hasReadyPostBtn) return false;
       const hasMedia = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).some(visible);
       const looksLikeMediaEditor = /edit|crop|move|photo|image|media|preview|layout|caption|next|done|continue/i.test(text);
       const looksLikeFinalComposer = /what.*mind|create post|say something|write something/i.test(text);
