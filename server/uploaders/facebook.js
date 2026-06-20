@@ -888,16 +888,18 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(2000);
     }
 
+    // Facebook can open a media editor between upload and the final composer.
+    // Put text into the real composer first, then verify/reinsert after media is
+    // confirmed so we never advance to an image-only Post dialog.
+    await insertFacebookTextIntoActiveComposer(page, fullText);
+    await page.waitForTimeout(400);
+
     if (imageFiles.length) {
       await attachImagesToFacebookComposer(page, imageFiles, dialogSel);
     }
 
-    await insertFacebookTextIntoActiveComposer(page, fullText);
-    await page.waitForTimeout(400);
-
-    // Some Facebook media flows open a temporary editor over the real composer.
-    // After media is attached/confirmed, write text only into the dialog that has
-    // the final Post button so suggestions/edit overlays cannot steal the post.
+    // Some Facebook media flows clear/hide text after the media editor closes.
+    // Re-write only if missing, then verify both text and media before Post.
     await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
