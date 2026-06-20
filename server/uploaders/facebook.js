@@ -525,7 +525,13 @@ async function waitForFacebookReadyComposer(page, expectedText, expectedMediaCou
     const readyIndex = await getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount);
     if (readyIndex >= 0) return readyIndex;
     if (expectedText && !(await facebookTextExistsInComposer(page, expectedText))) {
-      await insertFacebookTextIntoActiveComposer(page, expectedText, { onlyIfMissing: true }).catch(() => {});
+      const activeDialog = await getActiveFacebookDialogLocator(page);
+      const isMediaEditor = await activeDialog.evaluate((root) => {
+        const text = (root.innerText || root.textContent || '').toLowerCase();
+        const hasPostButton = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => /^(post|publish|share)$/i.test((btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim()));
+        return /edit photo|crop|move|layout|media editor|add a caption/i.test(text) && !hasPostButton;
+      }).catch(() => false);
+      if (!isMediaEditor) await insertFacebookTextIntoActiveComposer(page, expectedText, { onlyIfMissing: true }).catch(() => {});
     }
     await page.waitForTimeout(1000);
   }
