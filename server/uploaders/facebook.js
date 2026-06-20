@@ -20,6 +20,7 @@ function normalizeFacebookPermalink(raw) {
   if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
   if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
   if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(path)
+    || /^\/(?:photo|watch|reel)$/i.test(path)
     || /\/[^/]+\/permalink\//i.test(path)
     || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(path)
     || /\/permalink\.php$/i.test(path)
@@ -203,7 +204,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const combinedPath = p.match(/^\/(\d+)_(\d+)$/);
         if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
         if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
-        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
+        if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /^\/(?:photo|watch|reel)$/i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
           for (const key of ['story_fbid', 'fbid', 'id']) {
             const value = u.searchParams.get(key);
@@ -238,6 +239,11 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
     }
     return null;
   }, snippet).catch(() => null);
+}
+
+async function extractFacebookPermalinkFromPageSource(page) {
+  const html = await page.content().catch(() => '');
+  return extractFacebookPermalinkFromText(html);
 }
 
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
