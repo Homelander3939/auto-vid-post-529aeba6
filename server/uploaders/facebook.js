@@ -357,6 +357,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     if (stillDisabled === 'true') {
       throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
     }
+    const createPostPromise = waitForFacebookCreatePostResponse(page, 90000);
     await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
 
     // Wait for dialog to close (post published) — real success signal
@@ -369,9 +370,10 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
         throw new Error('Facebook did not confirm the post (composer still open). Leaving source files for retry.');
       }
     }
-    await page.waitForTimeout(3500);
+    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(8000).then(() => null)]).catch(() => null);
+    await page.waitForTimeout(1500);
 
-    return { url: await resolvePostedFacebookUrl(page, targetUrl, fullText) };
+    return { url: responsePermalink || await resolvePostedFacebookUrl(page, targetUrl, fullText) };
   } finally {
     await safeClose(context);
   }
