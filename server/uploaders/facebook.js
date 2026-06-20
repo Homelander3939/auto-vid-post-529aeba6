@@ -96,6 +96,78 @@ function extractFacebookPermalinkFromPayload(payload) {
   return visit(payload);
 }
 
+async function getActiveFacebookDialogIndex(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 80 && r.height > 80 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = dialogs
+      .map((el, index) => {
+        const z = Number.parseInt(window.getComputedStyle(el).zIndex || '0', 10);
+        const r = el.getBoundingClientRect();
+        return { index, z: Number.isFinite(z) ? z : 0, top: r.top, left: r.left };
+      })
+      .filter((item) => visible(dialogs[item.index]));
+    if (!candidates.length) return -1;
+    candidates.sort((a, b) => (a.z - b.z) || (a.index - b.index) || (a.top - b.top) || (a.left - b.left));
+    return candidates[candidates.length - 1].index;
+  }).catch(() => -1);
+}
+
+async function getActiveFacebookDialogLocator(page) {
+  const dialogs = page.locator('div[role="dialog"]');
+  const count = await dialogs.count().catch(() => 0);
+  if (!count) return dialogs.first();
+  const activeIndex = await getActiveFacebookDialogIndex(page);
+  const safeIndex = activeIndex >= 0 && activeIndex < count ? activeIndex : count - 1;
+  return dialogs.nth(safeIndex);
+}
+
+async function clickFacebookNextSteps(page, maxSteps = 4) {
+  for (let step = 0; step < maxSteps; step++) {
+    const dialog = await getActiveFacebookDialogLocator(page);
+    const buttons = dialog.locator('[aria-label="Next"][role="button"], div[role="button"]:has-text("Next")');
+    const count = await buttons.count().catch(() => 0);
+    let clicked = false;
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const disabled = await btn.getAttribute('aria-disabled').catch(() => null);
+      if (disabled === 'true') continue;
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
+      clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+      if (!clicked) clicked = await btn.click({ force: true, timeout: 8000 }).then(() => true).catch(() => false);
+      if (clicked) break;
+    }
+    if (!clicked) return step > 0;
+    await page.waitForTimeout(2500);
+  }
+  return true;
+}
+
+async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing = false } = {}) {
+  const expected = normalizePostText(fullText).slice(0, 90);
+  const dialog = await getActiveFacebookDialogLocator(page);
+  const textbox = dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+  await textbox.waitFor({ state: 'visible', timeout: 20000 });
+  const current = await textbox.innerText({ timeout: 3000 }).catch(() => '');
+  const normalizedCurrent = normalizePostText(current);
+  if (onlyIfMissing && expected && normalizedCurrent.includes(expected.slice(0, Math.min(45, expected.length)))) return;
+  await textbox.click({ timeout: 8000 });
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  if (fullText) {
+    await page.keyboard.insertText(fullText).catch(async () => {
+      await page.keyboard.type(fullText, { delay: 10 });
+    });
+  }
+  await page.waitForTimeout(900);
+}
+
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
   return await page.evaluate((selector) => {
     const visible = (el) => {
@@ -166,8 +238,10 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
   if (!expectedCount) return;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const state = await page.evaluate((selector) => {
-      const dialog = document.querySelector(selector) || document;
+    const activeIndex = await getActiveFacebookDialogIndex(page);
+    const state = await page.evaluate(({ selector, dialogIndex }) => {
+      const dialogs = Array.from(document.querySelectorAll(selector));
+      const dialog = dialogIndex >= 0 ? dialogs[dialogIndex] : (dialogs[dialogs.length - 1] || document);
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = window.getComputedStyle(el);
@@ -177,7 +251,7 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
       const busy = Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
       const text = (dialog.innerText || dialog.textContent || '').slice(0, 1000);
       return { previews, busy, text };
-    }, dialogSel).catch(() => ({ previews: 0, busy: false, text: '' }));
+    }, { selector: dialogSel, dialogIndex: activeIndex }).catch(() => ({ previews: 0, busy: false, text: '' }));
     if (/couldn't upload|could not upload|failed to upload|unsupported|try again/i.test(state.text || '')) {
       throw new Error(`Facebook rejected the media: ${state.text}. Leaving source files for retry.`);
     }
@@ -188,10 +262,11 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
 }
 
 async function getFacebookPostButton(page, dialogSel) {
+  const activeDialog = await getActiveFacebookDialogLocator(page);
   const groups = [
-    page.locator(`${dialogSel} [aria-label="Post"][role="button"]`),
-    page.locator(`${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`),
-    page.locator(`${dialogSel} [aria-label="Publish"][role="button"], ${dialogSel} div[role="button"]:has-text("Publish")`),
+    activeDialog.locator('[aria-label="Post"][role="button"]'),
+    activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
+    activeDialog.locator('[aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")'),
     page.getByRole('button', { name: /^Post$/ }),
   ];
   let fallback = null;
@@ -253,11 +328,8 @@ async function clickFacebookPostButton(page, dialogSel) {
 
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
-  const state = await page.evaluate((selector) => {
-    const root = document.querySelector(selector) || document;
-    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
-    return (textbox?.innerText || textbox?.textContent || '').trim();
-  }, dialogSel).catch(() => '');
+  const dialog = await getActiveFacebookDialogLocator(page);
+  const state = await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 5000 }).catch(() => '');
   const normalized = normalizePostText(state);
   if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
     throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
@@ -268,8 +340,10 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
   const deadline = Date.now() + timeout;
   let lastState = null;
   while (Date.now() < deadline) {
-    const state = await page.evaluate((selector) => {
-      const dialog = document.querySelector(selector);
+    const activeIndex = await getActiveFacebookDialogIndex(page);
+    const state = await page.evaluate(({ selector, dialogIndex }) => {
+      const dialogs = Array.from(document.querySelectorAll(selector));
+      const dialog = dialogIndex >= 0 ? dialogs[dialogIndex] : (dialogs[dialogs.length - 1] || null);
       const visible = (el) => {
         if (!el) return false;
         const r = el.getBoundingClientRect();
@@ -285,7 +359,7 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
         return visible(btn) && /^(post|publish)$/i.test(label || body);
       });
       return { dialogVisible: visible(dialog), busy, postButtonVisible, text };
-    }, dialogSel).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
+    }, { selector: dialogSel, dialogIndex: activeIndex }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
     lastState = state;
     if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
       throw new Error(`Facebook rejected the post: ${state.text.slice(0, 260)}. Leaving source files for retry.`);
@@ -565,13 +639,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(2000);
     }
 
-    const textbox = page.locator(`${dialogSel} div[role="textbox"][contenteditable="true"]`).first();
-    await textbox.waitFor({ state: 'visible', timeout: 15000 });
-    await textbox.click();
-    await page.keyboard.insertText(fullText).catch(async () => {
-      await page.keyboard.type(fullText, { delay: 10 });
-    });
-    await page.waitForTimeout(800);
+    await insertFacebookTextIntoActiveComposer(page, fullText);
 
     // Do not press Escape here: on Facebook it can close the composer/draft
     // instead of only closing hashtag autocomplete. We keep the dialog open and
@@ -592,14 +660,11 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
 
     await page.waitForTimeout(400);
 
-    // Some FB flows show "Next" before Post (e.g. when media is attached or for Pages)
-    for (let i = 0; i < 3; i++) {
-      const nextBtn = page.locator(`${dialogSel} [aria-label="Next"][role="button"], ${dialogSel} div[role="button"]:has-text("Next")`).first();
-      if (await nextBtn.isVisible().catch(() => false)) {
-        await nextBtn.click().catch(() => {});
-        await page.waitForTimeout(2000);
-      } else break;
-    }
+    // Some Facebook Page/media flows open a second composer over the original.
+    // Always advance the topmost dialog, then re-commit text into that active composer
+    // before clicking Post so the final post cannot become image-only.
+    await clickFacebookNextSteps(page, 4);
+    await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await verifyFacebookComposerHasText(page, dialogSel, fullText);
