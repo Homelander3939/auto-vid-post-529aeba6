@@ -5,7 +5,7 @@ const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
 const X_MAX_CHARS = 280;
-const X_SAFE_CHARS = 275;
+const X_SAFE_CHARS = 245;
 
 function xLength(value) {
   return Array.from(String(value || '').replace(/\r\n/g, '\n')).length;
