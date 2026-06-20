@@ -360,7 +360,7 @@ async function getFacebookComposerDialogIndex(page) {
       return { index, textboxes, hasPost, looksLikeComposer, looksLikePhotoViewer, z: Number.isFinite(z) ? z : 0 };
     }).filter((item) => visible(dialogs[item.index]) && (item.hasPost || (item.textboxes > 0 && item.looksLikeComposer)) && !item.looksLikePhotoViewer);
     if (!candidates.length) return -1;
-    candidates.sort((a, b) => ((a.hasPost ? 1 : 0) - (b.hasPost ? 1 : 0)) || (a.textboxes - b.textboxes) || (a.z - b.z) || (a.index - b.index));
+    candidates.sort((a, b) => ((a.hasPost ? 1 : 0) - (b.hasPost ? 1 : 0)) || ((a.hasPost ? a.textboxes : -a.textboxes) - (b.hasPost ? b.textboxes : -b.textboxes)) || (a.z - b.z) || (a.index - b.index));
     return candidates[candidates.length - 1].index;
   }).catch(() => -1);
 }
@@ -410,7 +410,7 @@ async function getFacebookTextComposerLocator(page) {
         if (/what.*mind|say something|write something|create post|post text|caption/i.test(combined)) score += 35;
         if (rect.width > 240) score += 15;
         if (rect.height > 35) score += 10;
-        if (/add a caption|media|edit photo|crop|move/i.test(combined) && !hasPost) score -= 50;
+        if (/add a caption|media|edit photo|crop|move/i.test(combined) && !hasPost) score -= 90;
         candidates.push({ dialogIndex, textboxIndex, score, z: Number.isFinite(z) ? z : 0 });
       });
     });
