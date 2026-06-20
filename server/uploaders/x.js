@@ -532,7 +532,8 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       throw new Error('X requires login. Use Prepare in Settings to log in once.');
     }
     const configuredHandle = handleFromXUrl(opts?.targetUrl);
-    const myHandle = configuredHandle || await getMyHandle(page);
+    const actualHandle = await getMyHandle(page);
+    const myHandle = actualHandle || configuredHandle;
     const baselineProfileStatusUrls = myHandle
       ? await fetchRecentXStatusUrlsFromProfile(page, myHandle, 8, 1500).catch(() => [])
       : [];
