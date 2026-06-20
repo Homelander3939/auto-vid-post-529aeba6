@@ -127,9 +127,78 @@ async function getActiveFacebookDialogLocator(page) {
   return dialogs.nth(safeIndex);
 }
 
+async function facebookComposerOpen(page, dialogSel = 'div[role="dialog"]') {
+  return await page.evaluate((selector) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 80 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const isComposerTextbox = (el) => {
+      const root = el.closest('form, main, [role="main"]') || document;
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('aria-placeholder') || ''} ${el.getAttribute('placeholder') || ''} ${el.innerText || el.textContent || ''} ${root.innerText || root.textContent || ''}`;
+      if (/search|comment|reply|message/i.test(label)) return false;
+      return /what.*mind|say something|write something|create post|post text|caption|compose/i.test(label)
+        || (el.getAttribute('role') === 'textbox' && el.getAttribute('contenteditable') === 'true' && /\b(post|publish|share)\b/i.test(label));
+    };
+    const hasDialogComposer = Array.from(document.querySelectorAll(selector)).some((dialog) => visible(dialog)
+      && Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((el) => visible(el) && isComposerTextbox(el)));
+    if (hasDialogComposer) return true;
+    return Array.from(document.querySelectorAll('main div[role="textbox"][contenteditable="true"], form textarea, main textarea'))
+      .some((el) => visible(el) && isComposerTextbox(el));
+  }, dialogSel).catch(() => false);
+}
+
+async function clickFacebookModernComposerEntry(page, needsMedia = false) {
+  const locators = [
+    page.locator('[role="button"]:has-text("on your mind"), [aria-label*="What" i]:has-text("mind")').first(),
+    page.locator('[role="button"]:has-text("Create post"), [aria-label*="Create post" i], a[href*="/composer/"]').first(),
+    page.locator('[role="button"]:has-text("Write something"), [aria-label*="Write something" i], [role="button"]:has-text("Say something")').first(),
+    page.locator('[role="button"]:has-text("Photo/video"), [aria-label*="Photo/video" i], [aria-label*="Photo" i]').first(),
+    page.locator('[role="button"]:has-text("Create"), [aria-label="Create"]').first(),
+  ];
+  for (const entry of locators) {
+    if (!(await entry.isVisible().catch(() => false))) continue;
+    await entry.scrollIntoViewIfNeeded().catch(() => {});
+    await entry.click({ force: true, timeout: 8000 }).catch(async () => { await entry.click({ timeout: 8000 }).catch(() => {}); });
+    await page.waitForTimeout(1500);
+    if (await facebookComposerOpen(page)) return true;
+    const menuPost = page.locator('[role="menuitem"]:has-text("Post"), [role="menuitem"]:has-text("Create post"), [role="button"]:has-text("Post")').first();
+    if (await menuPost.isVisible().catch(() => false)) {
+      await menuPost.click({ force: true }).catch(async () => { await menuPost.click().catch(() => {}); });
+      await page.waitForTimeout(1500);
+      if (await facebookComposerOpen(page)) return true;
+    }
+  }
+  return await page.evaluate((wantMedia) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 20 && r.height > 16 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const nodes = Array.from(document.querySelectorAll('a[href], [role="button"], button'));
+    const scored = nodes.map((el) => {
+      if (!visible(el)) return null;
+      const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('href') || '').trim();
+      let score = 0;
+      if (/create post|write something|what.*mind|say something|composer/i.test(text)) score += 80;
+      if (wantMedia && /photo|video|image|media/i.test(text)) score += 50;
+      if (/create$/i.test(text)) score += 25;
+      if (/search|comment|reply|message|story|reel|room|live|advertise|promote/i.test(text)) score -= 100;
+      return { el, score };
+    }).filter((item) => item && item.score > 0).sort((a, b) => b.score - a.score);
+    if (!scored.length) return false;
+    scored[0].el.click();
+    return true;
+  }, needsMedia).catch(() => false);
+}
+
 async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
+    if (!(await dialog.isVisible().catch(() => false))) return step > 0;
     const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], [aria-label="Share"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish"), div[role="button"]:has-text("Share")').first().isVisible().catch(() => false);
     if (postVisible) return step > 0;
     const expected = normalizePostText(expectedText).slice(0, 45);
@@ -291,6 +360,29 @@ async function getFacebookTextComposerLocator(page) {
 
   if (picked) {
     return page.locator('div[role="dialog"]').nth(picked.dialogIndex).locator('div[role="textbox"][contenteditable="true"]').nth(picked.textboxIndex);
+  }
+  const inlinePicked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 80 && r.height > 18 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const textboxes = Array.from(document.querySelectorAll('main div[role="textbox"][contenteditable="true"], form div[role="textbox"][contenteditable="true"], main textarea, form textarea'));
+    const candidates = textboxes.map((el, index) => {
+      if (!visible(el)) return null;
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('aria-placeholder') || ''} ${el.getAttribute('placeholder') || ''} ${el.closest('form, main, [role="main"]')?.innerText || ''}`;
+      if (/search|comment|reply|message/i.test(label)) return null;
+      const rect = el.getBoundingClientRect();
+      let score = rect.width > 260 ? 20 : 0;
+      if (/what.*mind|say something|write something|create post|post text|caption|compose/i.test(label)) score += 50;
+      if (el.closest('form')) score += 10;
+      return { index, score, top: rect.top };
+    }).filter(Boolean).sort((a, b) => (a.score - b.score) || (b.top - a.top));
+    return candidates.length ? candidates[candidates.length - 1].index : -1;
+  }).catch(() => -1);
+  if (inlinePicked >= 0) {
+    return page.locator('main div[role="textbox"][contenteditable="true"], form div[role="textbox"][contenteditable="true"], main textarea, form textarea').nth(inlinePicked);
   }
   const dialog = await getFacebookComposerDialogLocator(page);
   return dialog.locator('div[role="textbox"][contenteditable="true"]').first();
@@ -967,6 +1059,244 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   return null;
 }
 
+function toBasicFacebookUrl(targetUrl = null) {
+  try {
+    const source = targetUrl && /^https?:\/\//i.test(targetUrl) ? targetUrl : 'https://www.facebook.com/';
+    const url = new URL(source);
+    if (!/(^|\.)(facebook|fb)\.com$/i.test(url.hostname)) return 'https://mbasic.facebook.com/';
+    const path = url.pathname && url.pathname !== '/' ? url.pathname : '/me';
+    return `https://mbasic.facebook.com${path}${url.search || ''}`;
+  } catch {
+    return 'https://mbasic.facebook.com/me';
+  }
+}
+
+function toBasicFacebookPhotoUrl(targetUrl = null) {
+  try {
+    const base = new URL(toBasicFacebookUrl(targetUrl));
+    if (/\/profile\.php$/i.test(base.pathname) && base.searchParams.get('id')) return base.toString();
+    const path = base.pathname.replace(/\/$/, '') || '/me';
+    return `https://mbasic.facebook.com${path}/photos/`;
+  } catch {
+    return 'https://mbasic.facebook.com/me/photos/';
+  }
+}
+
+async function getFacebookBasicDiagnostics(page) {
+  return await page.evaluate(() => ({
+    url: location.href,
+    title: document.title,
+    textareas: document.querySelectorAll('textarea').length,
+    fileInputs: document.querySelectorAll('input[type="file"]').length,
+    submitButtons: Array.from(document.querySelectorAll('input[type="submit"], button[type="submit"], button, [role="button"]'))
+      .map((el) => (el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())
+      .filter(Boolean)
+      .slice(0, 20),
+    pageText: (document.body?.innerText || document.body?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 500),
+  })).catch((e) => ({ error: e.message, url: page.url() }));
+}
+
+async function clickFacebookBasicEntry(page, needsMedia = false) {
+  return await page.evaluate((wantMedia) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 4 && r.height > 4 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const candidates = Array.from(document.querySelectorAll('a[href], input[type="submit"], button, [role="button"]'))
+      .filter(visible)
+      .map((el) => {
+        const text = (el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+        const href = el.getAttribute('href') || '';
+        let score = 0;
+        if (wantMedia && /photo|image|video|media|add photos/i.test(`${text} ${href}`)) score += 80;
+        if (/create post|write something|what.*mind|publish|post|status|composer/i.test(`${text} ${href}`)) score += 50;
+        if (/search|comment|reply|message|like|follow|share this/i.test(text)) score -= 100;
+        return { el, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    if (!candidates.length) return false;
+    candidates[0].el.click();
+    return true;
+  }, needsMedia).catch(() => false);
+}
+
+async function getFacebookBasicState(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 4 && r.height > 4 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const textareas = Array.from(document.querySelectorAll('textarea')).filter(visible).length;
+    const fileInputs = Array.from(document.querySelectorAll('input[type="file"]')).filter((el) => !el.disabled).length;
+    const submitLabels = Array.from(document.querySelectorAll('input[type="submit"], button[type="submit"], button, [role="button"]'))
+      .filter((el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true')
+      .map((el) => (el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    const body = (document.body?.innerText || document.body?.textContent || '').trim().replace(/\s+/g, ' ');
+    return { textareas, fileInputs, submitLabels, hasSubmit: submitLabels.some((x) => /post|publish|share|next|continue|done|preview|upload|submit/i.test(x)), body: body.slice(0, 700), url: location.href };
+  }).catch(() => ({ textareas: 0, fileInputs: 0, submitLabels: [], hasSubmit: false, body: '', url: page.url() }));
+}
+
+async function fillFacebookBasicText(page, fullText) {
+  if (!fullText) return true;
+  const areas = page.locator('textarea');
+  const count = await areas.count().catch(() => 0);
+  for (let i = count - 1; i >= 0; i--) {
+    const area = areas.nth(i);
+    if (!(await area.isVisible().catch(() => false))) continue;
+    const label = `${await area.getAttribute('name').catch(() => '') || ''} ${await area.getAttribute('placeholder').catch(() => '') || ''} ${await area.getAttribute('aria-label').catch(() => '') || ''}`;
+    if (/search|comment|reply|message/i.test(label)) continue;
+    await area.fill(fullText, { timeout: 10000 }).catch(async () => {
+      await area.click({ timeout: 5000 }).catch(() => {});
+      await page.keyboard.insertText(fullText).catch(() => {});
+    });
+    const written = normalizePostText(await area.inputValue().catch(() => '')).includes(normalizePostText(fullText).slice(0, 45));
+    if (written) return true;
+  }
+  return false;
+}
+
+async function attachFacebookBasicImages(page, imageFiles) {
+  if (!imageFiles.length) return true;
+  const inputs = page.locator('input[type="file"]');
+  const count = await inputs.count().catch(() => 0);
+  for (let i = count - 1; i >= 0; i--) {
+    const input = inputs.nth(i);
+    const multiple = await input.getAttribute('multiple').catch(() => null);
+    const files = multiple != null ? imageFiles : imageFiles.slice(0, 1);
+    const attached = await input.setInputFiles(files, { timeout: 15000 }).then(() => true).catch(() => false);
+    if (attached) return true;
+  }
+  return false;
+}
+
+async function clickFacebookBasicSubmit(page) {
+  const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => null);
+  const clicked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 4 && r.height > 4 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const forms = Array.from(document.forms).filter((form) => form.querySelector('textarea, input[type="file"]'));
+    const roots = forms.length ? forms : [document.body];
+    const candidates = [];
+    for (const root of roots) {
+      for (const el of Array.from(root.querySelectorAll('input[type="submit"], button[type="submit"], button, [role="button"]'))) {
+        if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+        const text = (el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+        if (/search|cancel|back|delete|remove/i.test(text)) continue;
+        let score = 0;
+        if (/^(post|publish|share)$/i.test(text)) score += 100;
+        if (/post|publish|share/i.test(text)) score += 80;
+        if (/next|continue|done|preview|upload|submit/i.test(text)) score += 40;
+        candidates.push({ el, score });
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    const target = candidates.find((item) => item.score > 0);
+    if (!target) return false;
+    target.el.click();
+    return true;
+  }).catch(() => false);
+  if (clicked) await navPromise;
+  else await page.waitForTimeout(1000);
+  return clicked;
+}
+
+async function tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks = []) {
+  const basicUrl = toBasicFacebookUrl(targetUrl);
+  const startUrls = imageFiles.length ? [toBasicFacebookPhotoUrl(targetUrl), basicUrl] : [basicUrl];
+  for (const startUrl of startUrls) {
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    if (/login|checkpoint/i.test(page.url())) throw new Error('Facebook requires login. Use Prepare in Settings to log in once.');
+    const state = await getFacebookBasicState(page);
+    if (state.textareas || state.fileInputs || /photo|create post|write something|what.*mind|composer/i.test(state.body || '')) break;
+  }
+
+  let textWritten = false;
+  let mediaAttached = imageFiles.length === 0;
+  let submitted = false;
+  for (let attempt = 0; attempt < 14; attempt++) {
+    const state = await getFacebookBasicState(page);
+    if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.body || '')) {
+      throw new Error(`Facebook rejected the post: ${state.body.slice(0, 260)}. Leaving source files for retry.`);
+    }
+
+    if (!state.textareas || (imageFiles.length && !state.fileInputs && !mediaAttached)) {
+      if (textWritten && mediaAttached && state.hasSubmit) {
+        const clicked = await clickFacebookBasicSubmit(page);
+        if (clicked) {
+          submitted = true;
+          await page.waitForTimeout(3500);
+          const direct = normalizeFacebookPermalink(page.url());
+          if (direct && !(baselinePermalinks || []).includes(direct)) return direct;
+          const resolved = await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(() => null);
+          if (resolved) return resolved;
+          continue;
+        }
+      }
+      const opened = await clickFacebookBasicEntry(page, imageFiles.length > 0 && !mediaAttached);
+      if (opened) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        continue;
+      }
+      if (!state.textareas && attempt < 3) {
+        await page.goto('https://mbasic.facebook.com/composer/mbasic/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        continue;
+      }
+    }
+
+    if (!textWritten && state.textareas) {
+      textWritten = await fillFacebookBasicText(page, fullText);
+    }
+    if (!mediaAttached && state.fileInputs) {
+      mediaAttached = await attachFacebookBasicImages(page, imageFiles);
+    }
+
+    if (textWritten && mediaAttached) {
+      const clicked = await clickFacebookBasicSubmit(page);
+      if (!clicked) break;
+      submitted = true;
+      await page.waitForTimeout(3500);
+      const direct = normalizeFacebookPermalink(page.url());
+      if (direct && !(baselinePermalinks || []).includes(direct)) return direct;
+      const afterClick = await getFacebookBasicState(page);
+      if (afterClick.textareas || (afterClick.hasSubmit && /preview|review|confirm|add photo|photo|publish|post/i.test(`${afterClick.body} ${(afterClick.submitLabels || []).join(' ')}`))) {
+        continue;
+      }
+      const resolved = await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(() => null);
+      if (resolved) return resolved;
+      textWritten = await facebookBasicPageContainsText(page, fullText);
+      mediaAttached = imageFiles.length === 0 || !(await page.locator('input[type="file"]').count().catch(() => 0));
+      if (!textWritten) textWritten = false;
+    }
+  }
+  console.warn('[Facebook] Basic composer fallback did not complete:', JSON.stringify(await getFacebookBasicDiagnostics(page)));
+  if (submitted) throw new Error('Facebook post may have been submitted, but exact post link could not be found. Leaving source files for retry.');
+  return null;
+}
+
+async function facebookBasicPageContainsText(page, expectedText) {
+  const wanted = normalizePostText(expectedText).slice(0, 45);
+  if (!wanted) return true;
+  return await page.evaluate((needle) => {
+    const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const body = normalize(document.body?.innerText || document.body?.textContent || '');
+    return body.includes(needle);
+  }, wanted).catch(() => false);
+}
+
 async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', baselineUrls = []) {
   const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
   const wanted = normalizePostText(snippet).slice(0, 90);
@@ -1071,28 +1401,27 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
       : (description || '');
 
+    // Prefer Facebook's lightweight/basic composer first. It is server-rendered,
+    // uses stable textarea/file-input/form controls, and avoids the modern SPA's
+    // nested popups where text/media can land in different dialogs.
+    const basicUrl = await tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks).catch((e) => {
+      if (/requires login|rejected|may have been submitted|exact post link/i.test(e.message || '')) throw e;
+      console.warn('[Facebook] Basic composer fallback unavailable:', e.message);
+      return null;
+    });
+    if (basicUrl) {
+      await verifyPostedFacebookUrlContainsText(page, basicUrl, fullText);
+      return { url: basicUrl };
+    }
+
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+
     // Open composer if not already open
     const dialogSel = 'div[role="dialog"]';
-    const dialogOpen = async () => await page.locator(dialogSel).first().isVisible().catch(() => false);
+    const dialogOpen = async () => await facebookComposerOpen(page, dialogSel);
     if (!(await dialogOpen())) {
-      const prompts = [
-        page.locator('[role="button"]:has-text("on your mind"), [aria-label*="What" i]:has-text("mind")').first(),
-        page.locator('[role="button"]:has-text("Create post"), [aria-label*="Create post" i]').first(),
-        page.locator('[role="button"]:has-text("Create"), [aria-label="Create"]').first(),
-      ];
-      let opened = false;
-      for (const prompt of prompts) {
-        if (!(await prompt.isVisible().catch(() => false))) continue;
-        await prompt.click({ force: true }).catch(async () => { await prompt.click(); });
-        await page.waitForTimeout(1500);
-        if (await dialogOpen()) { opened = true; break; }
-        const menuPost = page.locator('[role="menuitem"]:has-text("Post"), [role="menuitem"]:has-text("Create post"), [role="button"]:has-text("Post")').first();
-        if (await menuPost.isVisible().catch(() => false)) {
-          await menuPost.click({ force: true }).catch(async () => { await menuPost.click(); });
-          await page.waitForTimeout(1500);
-          if (await dialogOpen()) { opened = true; break; }
-        }
-      }
+      const opened = await clickFacebookModernComposerEntry(page, imageFiles.length > 0);
       if (!opened) throw new Error('Could not open the Facebook Create Post composer. Leaving source files for retry.');
       await page.waitForTimeout(2000);
     }
