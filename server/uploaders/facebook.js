@@ -635,13 +635,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(2000);
     }
 
-    const textbox = page.locator(`${dialogSel} div[role="textbox"][contenteditable="true"]`).first();
-    await textbox.waitFor({ state: 'visible', timeout: 15000 });
-    await textbox.click();
-    await page.keyboard.insertText(fullText).catch(async () => {
-      await page.keyboard.type(fullText, { delay: 10 });
-    });
-    await page.waitForTimeout(800);
+    await insertFacebookTextIntoActiveComposer(page, fullText);
 
     // Do not press Escape here: on Facebook it can close the composer/draft
     // instead of only closing hashtag autocomplete. We keep the dialog open and
@@ -662,14 +656,11 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
 
     await page.waitForTimeout(400);
 
-    // Some FB flows show "Next" before Post (e.g. when media is attached or for Pages)
-    for (let i = 0; i < 3; i++) {
-      const nextBtn = page.locator(`${dialogSel} [aria-label="Next"][role="button"], ${dialogSel} div[role="button"]:has-text("Next")`).first();
-      if (await nextBtn.isVisible().catch(() => false)) {
-        await nextBtn.click().catch(() => {});
-        await page.waitForTimeout(2000);
-      } else break;
-    }
+    // Some Facebook Page/media flows open a second composer over the original.
+    // Always advance the topmost dialog, then re-commit text into that active composer
+    // before clicking Post so the final post cannot become image-only.
+    await clickFacebookNextSteps(page, 4);
+    await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await verifyFacebookComposerHasText(page, dialogSel, fullText);
