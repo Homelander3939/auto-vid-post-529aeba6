@@ -302,6 +302,43 @@ async function facebookTextExistsInComposer(page, expectedText) {
   }, wanted).catch(() => false);
 }
 
+async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount = 0) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  const wanted = expected.slice(0, Math.min(45, expected.length));
+  return await page.evaluate(({ needle, mediaCount }) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = [];
+    dialogs.forEach((dialog, index) => {
+      if (!visible(dialog)) return;
+      const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      if (!hasPost) return;
+      const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
+      if (!textOk) return;
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter((el) => {
+        if (!visible(el)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 40 && r.height > 40;
+      }).length;
+      if (mediaCount > 0 && previews < 1) return;
+      const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+      candidates.push({ index, previews, z: Number.isFinite(z) ? z : 0 });
+    });
+    candidates.sort((a, b) => (a.z - b.z) || (a.index - b.index) || (a.previews - b.previews));
+    return candidates.length ? candidates[candidates.length - 1].index : -1;
+  }, { needle: wanted, mediaCount: expectedMediaCount }).catch(() => -1);
+}
+
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
   return await page.evaluate((selector) => {
     const visible = (el) => {
