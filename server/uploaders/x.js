@@ -425,17 +425,20 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     let lastError = '';
     for (let attempt = 0; attempt < 4 && !confirmed; attempt++) {
       await dismissOverlayBlockingFlow(page, { logPrefix: '[X]', clickBackground: false }).catch(() => {});
+      const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000);
+      const responseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
       confirmed = result.confirmed;
-      publishedUrl = result.url || publishedUrl;
+      publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
       if (!confirmed) {
         await textArea.click().catch(() => {});
         await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
         result = await waitForXPublishConfirmation(page, textArea, 15000);
+        const shortcutResponseUrl = await Promise.race([createTweetPromise, page.waitForTimeout(100).then(() => null)]).catch(() => null);
         confirmed = result.confirmed;
-        publishedUrl = result.url || publishedUrl;
+        publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
         lastError = result.error || lastError;
       }
       if (!confirmed) await page.waitForTimeout(1500);
