@@ -555,6 +555,22 @@ async function resolvePostedXUrl(page, handle, snippet, baselineUrls = []) {
   return null;
 }
 
+async function verifyPostedXUrlContainsText(page, url, expectedText) {
+  const expected = String(expectedText || '').trim().replace(/\s+/g, ' ');
+  if (!expected || !url) return true;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  const articleText = await page.evaluate(() => {
+    const article = document.querySelector('article');
+    return (article?.innerText || article?.textContent || '').trim().replace(/\s+/g, ' ');
+  }).catch(() => '');
+  const needle = expected.slice(0, Math.min(45, expected.length));
+  if (needle && !articleText.includes(needle)) {
+    throw new Error('X published URL did not contain the intended text, so it is not treated as a successful post. Leaving source files for retry.');
+  }
+  return true;
+}
+
 async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
   const imageFiles = Array.isArray(imagePath) ? imagePath.filter(Boolean) : (imagePath ? [imagePath] : []);
   const xImageFiles = imageFiles.slice(0, X_MAX_IMAGES);
@@ -659,6 +675,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       console.error('[X] Link resolution diagnostics:', JSON.stringify(await getXDiagnostics(page)));
       throw new Error('X post was submitted, but a new exact profile status URL could not be verified. Leaving source files for retry.');
     }
+    await verifyPostedXUrlContainsText(page, finalUrl, postedText);
     return { url: finalUrl };
   } finally {
     await safeClose(context);
