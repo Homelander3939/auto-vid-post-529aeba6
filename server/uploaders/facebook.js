@@ -1075,9 +1075,25 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     const dialogSel = 'div[role="dialog"]';
     const dialogOpen = async () => await page.locator(dialogSel).first().isVisible().catch(() => false);
     if (!(await dialogOpen())) {
-      const prompt = page.locator('[role="button"]:has-text("on your mind"), [aria-label*="What" i]:has-text("mind")').first();
-      await prompt.waitFor({ state: 'visible', timeout: 30000 });
-      await prompt.click();
+      const prompts = [
+        page.locator('[role="button"]:has-text("on your mind"), [aria-label*="What" i]:has-text("mind")').first(),
+        page.locator('[role="button"]:has-text("Create post"), [aria-label*="Create post" i]').first(),
+        page.locator('[role="button"]:has-text("Create"), [aria-label="Create"]').first(),
+      ];
+      let opened = false;
+      for (const prompt of prompts) {
+        if (!(await prompt.isVisible().catch(() => false))) continue;
+        await prompt.click({ force: true }).catch(async () => { await prompt.click(); });
+        await page.waitForTimeout(1500);
+        if (await dialogOpen()) { opened = true; break; }
+        const menuPost = page.locator('[role="menuitem"]:has-text("Post"), [role="menuitem"]:has-text("Create post"), [role="button"]:has-text("Post")').first();
+        if (await menuPost.isVisible().catch(() => false)) {
+          await menuPost.click({ force: true }).catch(async () => { await menuPost.click(); });
+          await page.waitForTimeout(1500);
+          if (await dialogOpen()) { opened = true; break; }
+        }
+      }
+      if (!opened) throw new Error('Could not open the Facebook Create Post composer. Leaving source files for retry.');
       await page.waitForTimeout(2000);
     }
 
