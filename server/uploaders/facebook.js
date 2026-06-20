@@ -994,6 +994,9 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   const fromConfirmation = fresh(confirmationLink);
   if (fromConfirmation) return fromConfirmation;
 
+  const fromSeePost = fresh(await clickFacebookSeePostAndReadUrl(page));
+  if (fromSeePost) return fromSeePost;
+
   await page.waitForTimeout(2500);
   const copied = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
   if (copied) return copied;
