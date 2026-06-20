@@ -225,6 +225,81 @@ async function getFacebookComposerDialogLocator(page) {
   return getActiveFacebookDialogLocator(page);
 }
 
+async function getFacebookTextComposerLocator(page) {
+  const picked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 18 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = [];
+    dialogs.forEach((dialog, dialogIndex) => {
+      if (!visible(dialog)) return;
+      const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+      const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+      const hasPost = buttons.some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]'));
+      textboxes.forEach((textbox, textboxIndex) => {
+        if (!visible(textbox)) return;
+        const label = `${textbox.getAttribute('aria-label') || ''} ${textbox.getAttribute('aria-placeholder') || ''} ${textbox.getAttribute('placeholder') || ''}`;
+        const combined = `${label} ${dialogText}`;
+        if (/search|comment|reply|message/i.test(label)) return;
+        const rect = textbox.getBoundingClientRect();
+        let score = 0;
+        if (hasPost) score += 80;
+        if (/what.*mind|say something|write something|create post|post text|caption/i.test(combined)) score += 35;
+        if (rect.width > 240) score += 15;
+        if (rect.height > 35) score += 10;
+        if (/add a caption|media|edit photo|crop|move/i.test(combined) && !hasPost) score -= 50;
+        candidates.push({ dialogIndex, textboxIndex, score, z: Number.isFinite(z) ? z : 0 });
+      });
+    });
+    candidates.sort((a, b) => (a.score - b.score) || (a.z - b.z) || (a.dialogIndex - b.dialogIndex) || (a.textboxIndex - b.textboxIndex));
+    return candidates[candidates.length - 1] || null;
+  }).catch(() => null);
+
+  if (picked) {
+    return page.locator('div[role="dialog"]').nth(picked.dialogIndex).locator('div[role="textbox"][contenteditable="true"]').nth(picked.textboxIndex);
+  }
+  const dialog = await getFacebookComposerDialogLocator(page);
+  return dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+}
+
+async function facebookTextExistsInComposer(page, expectedText) {
+  const expected = normalizePostText(expectedText).slice(0, 90);
+  if (!expected) return true;
+  const wanted = expected.slice(0, Math.min(45, expected.length));
+  return await page.evaluate((needle) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 18 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+    for (const dialog of dialogs) {
+      const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && /^(post|publish)$/i.test(label || body);
+      });
+      for (const textbox of Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible)) {
+        const text = normalize(textbox.innerText || textbox.textContent || '');
+        if (text.includes(needle) && (hasPost || textbox.getBoundingClientRect().width > 200)) return true;
+      }
+    }
+    return false;
+  }, wanted).catch(() => false);
+}
+
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
   return await page.evaluate((selector) => {
     const visible = (el) => {
