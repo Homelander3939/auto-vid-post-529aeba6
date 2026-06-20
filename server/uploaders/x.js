@@ -533,7 +533,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     }
     const configuredHandle = handleFromXUrl(opts?.targetUrl);
     const actualHandle = await getMyHandle(page);
-    const myHandle = actualHandle || configuredHandle;
+    let myHandle = actualHandle || configuredHandle;
     const baselineProfileStatusUrls = myHandle
       ? await fetchRecentXStatusUrlsFromProfile(page, myHandle, 8, 1500).catch(() => [])
       : [];
