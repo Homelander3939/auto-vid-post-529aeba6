@@ -224,6 +224,9 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
     scored[0].el.click();
     return true;
   }).catch(() => false);
+  if (!(await facebookComposerOpen(page))) await closeFacebookNonComposerDialogs(page);
+  if (await facebookComposerOpen(page)) return true;
+  return false;
 }
 
 async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
