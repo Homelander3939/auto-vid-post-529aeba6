@@ -1228,7 +1228,7 @@ async function clickFacebookBasicSubmit(page) {
 
 async function tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks = []) {
   const basicUrl = toBasicFacebookUrl(targetUrl);
-  const startUrls = imageFiles.length ? [toBasicFacebookPhotoUrl(targetUrl), basicUrl] : [basicUrl];
+  const startUrls = [basicUrl, 'https://mbasic.facebook.com/composer/mbasic/'];
   for (const startUrl of startUrls) {
     await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(1500);
