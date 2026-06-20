@@ -478,8 +478,9 @@ async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel, { al
     activeDialog.locator('[aria-label="Post"][role="button"]'),
     activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
     activeDialog.locator('[aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")'),
+    activeDialog.locator('[aria-label="Share"][role="button"], div[role="button"]:has-text("Share")'),
   ];
-  if (allowGlobalFallback) groups.push(page.getByRole('button', { name: /^Post$/ }));
+  if (allowGlobalFallback) groups.push(page.getByRole('button', { name: /^(Post|Publish|Share)$/ }));
   let fallback = null;
   for (const buttons of groups) {
     const count = await buttons.count().catch(() => 0);
@@ -491,14 +492,14 @@ async function getFacebookPostButtonInDialog(page, activeDialog, dialogSel, { al
       const label = await btn.getAttribute('aria-label').catch(() => '') || '';
       const text = await btn.innerText().catch(() => '') || '';
       if (/postpone/i.test(`${label} ${text}`)) continue;
-      if (/^(post|publish)$/i.test(label.trim()) || /^(post|publish)$/i.test(text.trim()) || /\bpost\b/i.test(text)) return btn;
+      if (/^(post|publish|share)$/i.test(label.trim()) || /^(post|publish|share)$/i.test(text.trim()) || /\b(post|publish|share)\b/i.test(text)) return btn;
       fallback = fallback || btn;
     }
   }
   if (fallback) return fallback;
   return allowGlobalFallback
-    ? page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last()
-    : activeDialog.locator('[aria-label="Post"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), [aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")').last();
+    ? page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} [aria-label="Publish"][role="button"], ${dialogSel} [aria-label="Share"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone")), ${dialogSel} div[role="button"]:has-text("Publish"), ${dialogSel} div[role="button"]:has-text("Share")`).last()
+    : activeDialog.locator('[aria-label="Post"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), [aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish"), [aria-label="Share"][role="button"], div[role="button"]:has-text("Share")').last();
 }
 
 async function clickFacebookPostButton(page, dialogSel) {
