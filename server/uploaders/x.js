@@ -1,6 +1,9 @@
 // X (Twitter) post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
-const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
+// NOTE: do NOT import overlay-dismiss here. The compose UI is a role="dialog"
+// and X's close (✕) button has a screen-reader-only "Close" span — the generic
+// overlay dismisser would click it, trigger the "Save / Discard draft" prompt,
+// and the post would end up submitted without text (only media).
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
@@ -576,11 +579,30 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       await waitForXMediaReady(page, xImageFiles.length, 120000);
     }
 
+    const readComposerText = async () => await page.evaluate(() => {
+      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+      return ((el?.innerText || el?.textContent || '')).trim();
+    }).catch(() => '');
+
     let confirmed = false;
     let publishedUrl = null;
     let lastError = '';
     for (let attempt = 0; attempt < 4 && !confirmed; attempt++) {
-      await dismissOverlayBlockingFlow(page, { logPrefix: '[X]', clickBackground: false }).catch(() => {});
+      // Guard: make sure the composer still contains our text. If the textbox
+      // was cleared (e.g. by accidental focus loss or a popover), re-insert
+      // it. Refuse to click Post on an empty textbox — that's how we ended up
+      // posting media-only tweets previously.
+      const currentText = await readComposerText();
+      if (!currentText) {
+        await textArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+        await insertXText(page, textArea, postedText);
+        await page.waitForTimeout(800);
+        const recheck = await readComposerText();
+        if (!recheck) {
+          throw new Error('X composer lost its text before posting and could not be refilled. Leaving source files for retry.');
+        }
+      }
+
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000, myHandle);
@@ -589,16 +611,6 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       confirmed = result.confirmed;
       publishedUrl = responseUrl || result.url || publishedUrl;
       lastError = result.error || lastError;
-      if (!confirmed) {
-        await textArea.click().catch(() => {});
-        await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter').catch(() => {});
-        result = await waitForXPublishConfirmation(page, textArea, 15000, myHandle);
-        const shortcutResponseUrl = await waitForCreateTweetUrl(createTweetPromise, result.confirmed ? 30000 : 5000);
-        if (shortcutResponseUrl && !myHandle) myHandle = handleFromXUrl(shortcutResponseUrl) || myHandle;
-        confirmed = result.confirmed;
-        publishedUrl = shortcutResponseUrl || result.url || publishedUrl;
-        lastError = result.error || lastError;
-      }
       if (!confirmed) await page.waitForTimeout(1500);
     }
 

@@ -497,22 +497,31 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       } else break;
     }
 
-    const createPostPromise = waitForFacebookCreatePostResponse(page, 90000);
+    const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
     await clickFacebookPostButton(page, dialogSel);
 
-    // Wait for dialog to close (post published) — real success signal
+    // Wait for the composer to actually close — that is Facebook's real
+    // "post succeeded" signal. The publish spinner ("rolling around loading
+    // long time") can run for well over a minute on slow accounts, so give
+    // it a generous window instead of bailing early.
     const dialogClosed = await page.locator(dialogSel).first()
-      .waitFor({ state: 'hidden', timeout: 60000 })
+      .waitFor({ state: 'hidden', timeout: 180000 })
       .then(() => true).catch(() => false);
     if (!dialogClosed) {
       const stillOpen = await page.locator(dialogSel).first().isVisible().catch(() => false);
       if (stillOpen) {
         console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
-        throw new Error('Facebook did not confirm the post (composer still open). Leaving source files for retry.');
+        throw new Error('Facebook did not confirm the post (composer still spinning after 3 minutes). Leaving source files for retry.');
       }
     }
-    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(30000).then(() => null)]).catch(() => null);
-    await page.waitForTimeout(1500);
+
+    // Give Facebook time to propagate the new post to the profile feed before
+    // we go looking for its permalink.
+    await page.waitForTimeout(4000);
+    const responsePermalink = await Promise.race([
+      createPostPromise,
+      page.waitForTimeout(45000).then(() => null),
+    ]).catch(() => null);
 
     const baselineSet = new Set(baselinePermalinks);
     const normalizedResponsePermalink = normalizeFacebookPermalink(responsePermalink);
