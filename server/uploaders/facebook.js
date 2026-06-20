@@ -200,6 +200,8 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
         const story = u.searchParams.get('story_fbid') || u.searchParams.get('fbid');
         const id = u.searchParams.get('id');
         const origin = 'https://www.facebook.com';
+        const combinedPath = p.match(/^\/(\d+)_(\d+)$/);
+        if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
         if (story && id) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(id)}`;
         if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(p) || /\/[^/]+\/permalink\//i.test(p) || /\/groups\/[^/]+\/(?:posts|permalink)\//i.test(p) || /\/permalink\.php$/i.test(p) || /\/story\.php$/i.test(p) || /\/photo\.php$/i.test(p) || /\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(p) || /\/shares?\//i.test(p)) {
           const keep = new URLSearchParams();
@@ -227,7 +229,7 @@ async function extractFacebookPermalinkFromArticles(page, snippet = '') {
       const anchors = Array.from(article.querySelectorAll('a[href]'));
       const direct = anchors
         .map((a) => ({ href: a.getAttribute('href') || '', text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim() }))
-        .filter((a) => !/comment|reaction|profile.php\?id=/i.test(a.href))
+        .filter((a) => !/comment|reaction|profile.php\?id=|\/friends\//i.test(a.href))
         .sort((a, b) => (/just now|\d+\s*(m|min)|hour|yesterday|at/i.test(b.text) ? 1 : 0) - (/just now|\d+\s*(m|min)|hour|yesterday|at/i.test(a.text) ? 1 : 0));
       for (const a of direct) {
         const out = normalizeUrl(a.href);
