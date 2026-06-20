@@ -151,7 +151,7 @@ async function clickFacebookNextSteps(page, maxSteps = 4) {
 
 async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing = false } = {}) {
   const expected = normalizePostText(fullText).slice(0, 90);
-  const dialog = await getActiveFacebookDialogLocator(page);
+  const dialog = await getFacebookComposerDialogLocator(page);
   const textbox = dialog.locator('div[role="textbox"][contenteditable="true"]').first();
   await textbox.waitFor({ state: 'visible', timeout: 20000 });
   const current = await textbox.innerText({ timeout: 3000 }).catch(() => '');
@@ -166,6 +166,40 @@ async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMiss
     });
   }
   await page.waitForTimeout(900);
+}
+
+async function getFacebookComposerDialogIndex(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 80 && r.height > 80 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = dialogs.map((dialog, index) => {
+      const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible).length;
+      const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
+      return { index, textboxes, hasPost, z: Number.isFinite(z) ? z : 0 };
+    }).filter((item) => visible(dialogs[item.index]) && (item.textboxes > 0 || item.hasPost));
+    if (!candidates.length) return -1;
+    candidates.sort((a, b) => ((a.hasPost ? 1 : 0) - (b.hasPost ? 1 : 0)) || (a.textboxes - b.textboxes) || (a.z - b.z) || (a.index - b.index));
+    return candidates[candidates.length - 1].index;
+  }).catch(() => -1);
+}
+
+async function getFacebookComposerDialogLocator(page) {
+  const dialogs = page.locator('div[role="dialog"]');
+  const count = await dialogs.count().catch(() => 0);
+  if (!count) return dialogs.first();
+  const composerIndex = await getFacebookComposerDialogIndex(page);
+  if (composerIndex >= 0 && composerIndex < count) return dialogs.nth(composerIndex);
+  return getActiveFacebookDialogLocator(page);
 }
 
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
