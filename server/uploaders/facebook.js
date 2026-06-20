@@ -187,6 +187,70 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
   throw new Error('Facebook media upload did not finish. Leaving source files for retry.');
 }
 
+async function getFacebookPostButton(page, dialogSel) {
+  const groups = [
+    page.locator(`${dialogSel} [aria-label="Post"][role="button"]`),
+    page.locator(`${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`),
+    page.locator(`${dialogSel} [aria-label="Publish"][role="button"], ${dialogSel} div[role="button"]:has-text("Publish")`),
+    page.getByRole('button', { name: /^Post$/ }),
+  ];
+  let fallback = null;
+  for (const buttons of groups) {
+    const count = await buttons.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const box = await btn.boundingBox().catch(() => null);
+      if (!box || box.width < 20 || box.height < 20) continue;
+      const label = await btn.getAttribute('aria-label').catch(() => '') || '';
+      const text = await btn.innerText().catch(() => '') || '';
+      if (/postpone/i.test(`${label} ${text}`)) continue;
+      if (/^(post|publish)$/i.test(label.trim()) || /^(post|publish)$/i.test(text.trim()) || /\bpost\b/i.test(text)) return btn;
+      fallback = fallback || btn;
+    }
+  }
+  return fallback || page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
+}
+
+async function clickFacebookPostButton(page, dialogSel) {
+  const postBtn = await getFacebookPostButton(page, dialogSel);
+  await postBtn.waitFor({ state: 'visible', timeout: 20000 });
+  for (let i = 0; i < 45; i++) {
+    const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+    if (disabled !== 'true') break;
+    await page.waitForTimeout(500);
+  }
+  const stillDisabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
+  if (stillDisabled === 'true') {
+    console.error('[Facebook] Disabled Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
+  }
+  await postBtn.scrollIntoViewIfNeeded().catch(() => {});
+  let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  if (!clicked) {
+    clicked = await page.evaluate((selector) => {
+      const dialog = document.querySelector(selector) || document;
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+      const btn = buttons.reverse().find((el) => visible(el)
+        && el.getAttribute('aria-disabled') !== 'true'
+        && /^(post|publish)$/i.test(((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())));
+      if (!btn) return false;
+      btn.click();
+      return true;
+    }, dialogSel).catch(() => false);
+  }
+  if (!clicked) {
+    console.error('[Facebook] Click Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+    throw new Error('Could not click the Facebook Post button. Leaving source files for retry.');
+  }
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
