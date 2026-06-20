@@ -377,9 +377,14 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   return null;
 }
 
-async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
+async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', baselineUrls = []) {
+  const baselineSet = new Set((Array.isArray(baselineUrls) ? baselineUrls : []).map(normalizeFacebookPermalink).filter(Boolean));
+  const fresh = (url) => {
+    const normalized = normalizeFacebookPermalink(url);
+    return normalized && !baselineSet.has(normalized) ? normalized : null;
+  };
   const direct = normalizeFacebookPermalink(page.url());
-  if (direct) return direct;
+  if (direct && !baselineSet.has(direct)) return direct;
 
   const confirmationLink = await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('a[href]'));
@@ -391,13 +396,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
     }
     return null;
   }).catch(() => null);
-  const fromConfirmation = normalizeFacebookPermalink(confirmationLink);
+  const fromConfirmation = fresh(confirmationLink);
   if (fromConfirmation) return fromConfirmation;
 
   await page.waitForTimeout(2500);
-  const copied = await copyFacebookLinkFromTopArticle(page, snippet);
+  const copied = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
   if (copied) return copied;
-  const onCurrentPage = await extractFacebookPermalinkFromArticles(page, snippet);
+  const onCurrentPage = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
   if (onCurrentPage) return onCurrentPage;
 
   const urlsToScan = [];
@@ -407,10 +412,13 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '') {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     for (let attempt = 0; attempt < 5; attempt++) {
       await page.waitForTimeout(3000 + attempt * 1500);
-      const copiedAfterNav = await copyFacebookLinkFromTopArticle(page, snippet);
+      const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
-      const permalink = await extractFacebookPermalinkFromArticles(page, snippet);
+      const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
       if (permalink) return permalink;
+      const recent = await fetchRecentFacebookPermalinks(page, scanUrl, 8, 1000).catch(() => []);
+      const newRecent = recent.find((url) => !baselineSet.has(url));
+      if (newRecent) return newRecent;
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     }
   }
