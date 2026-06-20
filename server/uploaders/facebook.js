@@ -260,10 +260,11 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
 }
 
 async function getFacebookPostButton(page, dialogSel) {
+  const activeDialog = await getActiveFacebookDialogLocator(page);
   const groups = [
-    page.locator(`${dialogSel} [aria-label="Post"][role="button"]`),
-    page.locator(`${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`),
-    page.locator(`${dialogSel} [aria-label="Publish"][role="button"], ${dialogSel} div[role="button"]:has-text("Publish")`),
+    activeDialog.locator('[aria-label="Post"][role="button"]'),
+    activeDialog.locator('div[role="button"]:has-text("Post"):not(:has-text("Postpone"))'),
+    activeDialog.locator('[aria-label="Publish"][role="button"], div[role="button"]:has-text("Publish")'),
     page.getByRole('button', { name: /^Post$/ }),
   ];
   let fallback = null;
@@ -325,11 +326,8 @@ async function clickFacebookPostButton(page, dialogSel) {
 
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
-  const state = await page.evaluate((selector) => {
-    const root = document.querySelector(selector) || document;
-    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
-    return (textbox?.innerText || textbox?.textContent || '').trim();
-  }, dialogSel).catch(() => '');
+  const dialog = await getActiveFacebookDialogLocator(page);
+  const state = await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 5000 }).catch(() => '');
   const normalized = normalizePostText(state);
   if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
     throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
