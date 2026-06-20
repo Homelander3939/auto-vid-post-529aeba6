@@ -411,6 +411,9 @@ async function facebookTextExistsInComposer(page, expectedText) {
     const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
     for (const dialog of dialogs) {
+      const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
+      if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) continue;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
@@ -440,6 +443,9 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
     const candidates = [];
     dialogs.forEach((dialog, index) => {
       if (!visible(dialog)) return;
+      const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
+      if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) return;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
