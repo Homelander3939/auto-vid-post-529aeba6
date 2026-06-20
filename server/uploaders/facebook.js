@@ -238,8 +238,10 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
   if (!expectedCount) return;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const state = await page.evaluate((selector) => {
-      const dialog = document.querySelector(selector) || document;
+    const activeIndex = await getActiveFacebookDialogIndex(page);
+    const state = await page.evaluate(({ selector, dialogIndex }) => {
+      const dialogs = Array.from(document.querySelectorAll(selector));
+      const dialog = dialogIndex >= 0 ? dialogs[dialogIndex] : (dialogs[dialogs.length - 1] || document);
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const s = window.getComputedStyle(el);
@@ -249,7 +251,7 @@ async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout
       const busy = Array.from(dialog.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
       const text = (dialog.innerText || dialog.textContent || '').slice(0, 1000);
       return { previews, busy, text };
-    }, dialogSel).catch(() => ({ previews: 0, busy: false, text: '' }));
+    }, { selector: dialogSel, dialogIndex: activeIndex }).catch(() => ({ previews: 0, busy: false, text: '' }));
     if (/couldn't upload|could not upload|failed to upload|unsupported|try again/i.test(state.text || '')) {
       throw new Error(`Facebook rejected the media: ${state.text}. Leaving source files for retry.`);
     }
@@ -338,8 +340,10 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
   const deadline = Date.now() + timeout;
   let lastState = null;
   while (Date.now() < deadline) {
-    const state = await page.evaluate((selector) => {
-      const dialog = document.querySelector(selector);
+    const activeIndex = await getActiveFacebookDialogIndex(page);
+    const state = await page.evaluate(({ selector, dialogIndex }) => {
+      const dialogs = Array.from(document.querySelectorAll(selector));
+      const dialog = dialogIndex >= 0 ? dialogs[dialogIndex] : (dialogs[dialogs.length - 1] || null);
       const visible = (el) => {
         if (!el) return false;
         const r = el.getBoundingClientRect();
@@ -355,7 +359,7 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
         return visible(btn) && /^(post|publish)$/i.test(label || body);
       });
       return { dialogVisible: visible(dialog), busy, postButtonVisible, text };
-    }, dialogSel).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
+    }, { selector: dialogSel, dialogIndex: activeIndex }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, text: '' }));
     lastState = state;
     if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
       throw new Error(`Facebook rejected the post: ${state.text.slice(0, 260)}. Leaving source files for retry.`);
