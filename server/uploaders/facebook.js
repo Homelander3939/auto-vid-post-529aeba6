@@ -96,6 +96,78 @@ function extractFacebookPermalinkFromPayload(payload) {
   return visit(payload);
 }
 
+async function getActiveFacebookDialogIndex(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 80 && r.height > 80 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+    const candidates = dialogs
+      .map((el, index) => {
+        const z = Number.parseInt(window.getComputedStyle(el).zIndex || '0', 10);
+        const r = el.getBoundingClientRect();
+        return { index, z: Number.isFinite(z) ? z : 0, top: r.top, left: r.left };
+      })
+      .filter((item) => visible(dialogs[item.index]));
+    if (!candidates.length) return -1;
+    candidates.sort((a, b) => (a.z - b.z) || (a.index - b.index) || (a.top - b.top) || (a.left - b.left));
+    return candidates[candidates.length - 1].index;
+  }).catch(() => -1);
+}
+
+async function getActiveFacebookDialogLocator(page) {
+  const dialogs = page.locator('div[role="dialog"]');
+  const count = await dialogs.count().catch(() => 0);
+  if (!count) return dialogs.first();
+  const activeIndex = await getActiveFacebookDialogIndex(page);
+  const safeIndex = activeIndex >= 0 && activeIndex < count ? activeIndex : count - 1;
+  return dialogs.nth(safeIndex);
+}
+
+async function clickFacebookNextSteps(page, maxSteps = 4) {
+  for (let step = 0; step < maxSteps; step++) {
+    const dialog = await getActiveFacebookDialogLocator(page);
+    const buttons = dialog.locator('[aria-label="Next"][role="button"], div[role="button"]:has-text("Next")');
+    const count = await buttons.count().catch(() => 0);
+    let clicked = false;
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const disabled = await btn.getAttribute('aria-disabled').catch(() => null);
+      if (disabled === 'true') continue;
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
+      clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+      if (!clicked) clicked = await btn.click({ force: true, timeout: 8000 }).then(() => true).catch(() => false);
+      if (clicked) break;
+    }
+    if (!clicked) return step > 0;
+    await page.waitForTimeout(2500);
+  }
+  return true;
+}
+
+async function insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing = false } = {}) {
+  const expected = normalizePostText(fullText).slice(0, 90);
+  const dialog = await getActiveFacebookDialogLocator(page);
+  const textbox = dialog.locator('div[role="textbox"][contenteditable="true"]').first();
+  await textbox.waitFor({ state: 'visible', timeout: 20000 });
+  const current = await textbox.innerText({ timeout: 3000 }).catch(() => '');
+  const normalizedCurrent = normalizePostText(current);
+  if (onlyIfMissing && expected && normalizedCurrent.includes(expected.slice(0, Math.min(45, expected.length)))) return;
+  await textbox.click({ timeout: 8000 });
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  if (fullText) {
+    await page.keyboard.insertText(fullText).catch(async () => {
+      await page.keyboard.type(fullText, { delay: 10 });
+    });
+  }
+  await page.waitForTimeout(900);
+}
+
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
   return await page.evaluate((selector) => {
     const visible = (el) => {
