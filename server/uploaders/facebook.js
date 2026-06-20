@@ -589,6 +589,8 @@ function waitForFacebookCreatePostResponse(page, timeout = 90000) {
       if (response.status() >= 400) return;
       try {
         const body = await response.text();
+        const looksLikePostCreation = /CreatePost|ComposerPublish|story_create|create_post|post_publish|ufi_create|status_publish|comet\.composer|CometComposer/i.test(body);
+        if (!looksLikePostCreation) return;
         const fromText = extractFacebookPermalinkFromText(body);
         if (fromText) return finish(fromText);
         const cleaned = body.replace(/^for \(;;\);/, '').trim();
