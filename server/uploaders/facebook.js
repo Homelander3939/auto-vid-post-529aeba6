@@ -1071,6 +1071,17 @@ function toBasicFacebookUrl(targetUrl = null) {
   }
 }
 
+function toBasicFacebookPhotoUrl(targetUrl = null) {
+  try {
+    const base = new URL(toBasicFacebookUrl(targetUrl));
+    if (/\/profile\.php$/i.test(base.pathname) && base.searchParams.get('id')) return base.toString();
+    const path = base.pathname.replace(/\/$/, '') || '/me';
+    return `https://mbasic.facebook.com${path}/photos/`;
+  } catch {
+    return 'https://mbasic.facebook.com/me/photos/';
+  }
+}
+
 async function getFacebookBasicDiagnostics(page) {
   return await page.evaluate(() => ({
     url: location.href,
@@ -1202,9 +1213,14 @@ async function clickFacebookBasicSubmit(page) {
 
 async function tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks = []) {
   const basicUrl = toBasicFacebookUrl(targetUrl);
-  await page.goto(basicUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-  await page.waitForTimeout(1500);
-  if (/login|checkpoint/i.test(page.url())) throw new Error('Facebook requires login. Use Prepare in Settings to log in once.');
+  const startUrls = imageFiles.length ? [toBasicFacebookPhotoUrl(targetUrl), basicUrl] : [basicUrl];
+  for (const startUrl of startUrls) {
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    if (/login|checkpoint/i.test(page.url())) throw new Error('Facebook requires login. Use Prepare in Settings to log in once.');
+    const state = await getFacebookBasicState(page);
+    if (state.textareas || state.fileInputs || /photo|create post|write something|what.*mind|composer/i.test(state.body || '')) break;
+  }
 
   let textWritten = false;
   let mediaAttached = imageFiles.length === 0;
