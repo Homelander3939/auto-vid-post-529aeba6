@@ -305,6 +305,36 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
   throw new Error(`X media upload did not become publish-ready.${detail}. Leaving source files for retry.`);
 }
 
+async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
+  const expected = String(expectedText || '').trim();
+  const expectedNeedle = expected.replace(/\s+/g, ' ').slice(0, Math.min(80, expected.length));
+  const deadline = Date.now() + timeout;
+  let last = '';
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => {
+      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+      const text = (el?.innerText || el?.textContent || '').trim();
+      const composer = el?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
+      const enabledButton = Array.from(composer.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"], button, [role="button"]'))
+        .some((btn) => {
+          const r = btn.getBoundingClientRect();
+          const s = window.getComputedStyle(btn);
+          const label = (btn.getAttribute('aria-label') || '').trim();
+          const body = (btn.innerText || btn.textContent || '').trim();
+          return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
+            && btn.getAttribute('aria-disabled') !== 'true' && !btn.disabled
+            && (/^post$/i.test(label) || /^post$/i.test(body));
+        });
+      return { text, enabledButton };
+    }).catch(() => ({ text: '', enabledButton: false }));
+    last = state.text || '';
+    const normalized = last.replace(/\s+/g, ' ');
+    if (state.enabledButton && last && (!expectedNeedle || normalized.includes(expectedNeedle))) return true;
+    await page.waitForTimeout(500);
+  }
+  throw new Error(`X composer text was not committed before posting (visible text: ${last.slice(0, 120) || 'empty'}). Leaving source files for retry.`);
+}
+
 async function waitForEnabledXPostButton(page, timeout = 90000) {
   const deadline = Date.now() + timeout;
   let lastButton = null;
