@@ -134,16 +134,30 @@ async function ensureXTextWithinLimit(page, textArea, desiredText) {
 }
 
 async function getXPostButton(page) {
-  const buttons = page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]');
-  const count = await buttons.count().catch(() => 0);
-  for (let i = count - 1; i >= 0; i--) {
-    const btn = buttons.nth(i);
-    if (!(await btn.isVisible().catch(() => false))) continue;
-    const label = await btn.getAttribute('aria-label').catch(() => '') || '';
-    const text = await btn.innerText().catch(() => '') || '';
-    if (/^post$/i.test(label.trim()) || /\bpost\b/i.test(text)) return btn;
+  const locatorGroups = [
+    page.locator('[role="dialog"] [data-testid="tweetButton"], [role="dialog"] [aria-label="Post"][role="button"]'),
+    page.locator('[data-testid="primaryColumn"] [data-testid="tweetButtonInline"], [data-testid="primaryColumn"] [data-testid="tweetButton"], [data-testid="primaryColumn"] [aria-label="Post"][role="button"]'),
+    page.locator('main [data-testid="tweetButtonInline"], main [data-testid="tweetButton"], main [aria-label="Post"][role="button"]'),
+    page.getByRole('button', { name: /^Post$/ }),
+    page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]'),
+  ];
+
+  let fallback = null;
+  for (const buttons of locatorGroups) {
+    const count = await buttons.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const btn = buttons.nth(i);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const box = await btn.boundingBox().catch(() => null);
+      if (!box || box.width < 20 || box.height < 20) continue;
+      const label = await btn.getAttribute('aria-label').catch(() => '') || '';
+      const text = await btn.innerText().catch(() => '') || '';
+      const looksLikePost = /^post$/i.test(label.trim()) || /^post$/i.test(text.trim()) || /\bpost\b/i.test(text);
+      if (looksLikePost) return btn;
+      fallback = fallback || btn;
+    }
   }
-  return buttons.last();
+  return fallback || page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"]').last();
 }
 
 async function isXPostButtonEnabled(page) {
@@ -204,7 +218,10 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
     }
     const postEnabled = await isXPostButtonEnabled(page).catch(() => false);
     const hasExpectedPreview = state.previews >= Math.min(expectedCount, X_MAX_IMAGES);
-    const readyEnough = postEnabled && !state.busy && hasExpectedPreview;
+    // X often leaves a decorative/progress element visible after images already
+    // have previews and the real Post button is enabled. Button-enabled + stable
+    // expected previews is the strongest publish-ready signal.
+    const readyEnough = postEnabled && hasExpectedPreview;
     if (readyEnough) {
       if (!stableReadySince) stableReadySince = Date.now();
       if (Date.now() - stableReadySince >= 2500) return true;
@@ -256,6 +273,10 @@ async function clickXPostButton(page) {
       btn.click();
       return true;
     }).catch(() => false);
+  }
+  if (!clicked) {
+    const rolePost = page.getByRole('button', { name: /^Post$/ }).last();
+    clicked = await rolePost.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
   }
   if (!clicked) throw new Error('Could not click the X Post button. Leaving source files for retry.');
 }
