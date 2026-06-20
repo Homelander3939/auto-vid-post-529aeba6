@@ -310,6 +310,34 @@ async function extractFacebookPermalinkFromPageSource(page) {
   return extractFacebookPermalinkFromText(html);
 }
 
+async function fetchRecentFacebookPermalinks(page, targetUrl = null, limit = 8, settleMs = 2500) {
+  const scanUrl = targetUrl && /^https?:\/\//i.test(targetUrl) && !/^https?:\/\/(?:www\.)?facebook\.com\/?$/i.test(targetUrl)
+    ? targetUrl
+    : 'https://www.facebook.com/me';
+  await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(settleMs);
+  const hrefs = await page.evaluate((maxItems) => {
+    const articles = Array.from(document.querySelectorAll('[role="article"]'));
+    const roots = articles.length ? articles.slice(0, maxItems) : [document.body];
+    const out = [];
+    const seen = new Set();
+    for (const root of roots) {
+      for (const a of Array.from(root.querySelectorAll('a[href]'))) {
+        const href = a.getAttribute('href') || '';
+        if (!/story_fbid=|fbid=|\/posts\/|\/permalink\.php|\/story\.php|\/photo\.php|\/videos?\/|\/reel\/|\/groups\/[^/]+\/(?:posts|permalink)\/|\/(?:share|shareable)\/(?:p|r|v|post|video)\//i.test(href)) continue;
+        if (/comment|reaction|profile\.php\?id=|\/friends\//i.test(href)) continue;
+        const absolute = href.startsWith('http') ? href : `https://www.facebook.com${href}`;
+        if (seen.has(absolute)) continue;
+        seen.add(absolute);
+        out.push(absolute);
+        if (out.length >= maxItems) return out;
+      }
+    }
+    return out;
+  }, limit).catch(() => []);
+  return Array.from(new Set((Array.isArray(hrefs) ? hrefs : []).map(normalizeFacebookPermalink).filter(Boolean)));
+}
+
 async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const articles = page.locator('[role="article"]');
   const count = Math.min(await articles.count().catch(() => 0), 5);
