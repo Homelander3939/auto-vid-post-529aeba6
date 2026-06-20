@@ -1055,25 +1055,39 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Re-write only if missing, then verify both text and media before Post.
     await insertFacebookTextIntoActiveComposer(page, fullText, { onlyIfMissing: true });
 
-    const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
-    await verifyFacebookComposerHasText(page, dialogSel, fullText);
-    await verifyFacebookComposerHasMedia(page, imageFiles.length);
-    await clickFacebookVerifiedPostButton(page, dialogSel, fullText, imageFiles.length);
+    let confirmed = false;
+    let responsePermalink = null;
+    let publishedUrl = null;
+    let lastPostError = '';
+    for (let attempt = 0; attempt < 3 && !confirmed; attempt++) {
+      await waitForFacebookReadyComposer(page, fullText, imageFiles.length, 180000);
+      await verifyFacebookComposerHasText(page, dialogSel, fullText);
+      await verifyFacebookComposerHasMedia(page, imageFiles.length);
+      const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
+      await clickFacebookVerifiedPostButton(page, dialogSel, fullText, imageFiles.length);
+      const result = await waitForFacebookPublishConfirmation(page, dialogSel, fullText, 420000);
+      const captured = await Promise.race([
+        createPostPromise,
+        page.waitForTimeout(result.confirmed ? 45000 : 5000).then(() => null),
+      ]).catch(() => null);
+      responsePermalink = normalizeFacebookPermalink(captured) || responsePermalink;
+      publishedUrl = normalizeFacebookPermalink(result.url) || responsePermalink || publishedUrl;
+      confirmed = Boolean(result.confirmed);
+      lastPostError = result.error || lastPostError;
+      if (!confirmed && !result.retry) break;
+      if (!confirmed) await page.waitForTimeout(2000);
+    }
 
-    // Wait for the composer/spinner to fully finish. Facebook Page posts can
-    // keep rolling for several minutes; do not close or resolve early.
-    await waitForFacebookComposerToFinish(page, dialogSel, 420000);
+    if (!confirmed) {
+      console.error('[Facebook] Publish diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+      throw new Error(`Facebook did not confirm the post${lastPostError ? `: ${lastPostError}` : ''}. Leaving source files for retry.`);
+    }
 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
     await page.waitForTimeout(8000);
-    const responsePermalink = await Promise.race([
-      createPostPromise,
-      page.waitForTimeout(45000).then(() => null),
-    ]).catch(() => null);
-
     const baselineSet = new Set(baselinePermalinks);
-    const normalizedResponsePermalink = normalizeFacebookPermalink(responsePermalink);
+    const normalizedResponsePermalink = normalizeFacebookPermalink(publishedUrl) || normalizeFacebookPermalink(responsePermalink);
     const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
       || await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(async (e) => {
         const fromSource = normalizeFacebookPermalink(await extractFacebookPermalinkFromPageSource(page));
