@@ -457,35 +457,31 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       } else break;
     }
 
-    const postBtn = page.locator(`${dialogSel} [aria-label="Post"][role="button"], ${dialogSel} div[role="button"]:has-text("Post"):not(:has-text("Postpone"))`).last();
-    await postBtn.waitFor({ state: 'visible', timeout: 15000 });
-    // Wait for enabled
-    for (let i = 0; i < 30; i++) {
-      const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
-      if (disabled !== 'true') break;
-      await page.waitForTimeout(500);
-    }
-    const stillDisabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
-    if (stillDisabled === 'true') {
-      throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
-    }
     const createPostPromise = waitForFacebookCreatePostResponse(page, 90000);
-    await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
+    await clickFacebookPostButton(page, dialogSel);
 
     // Wait for dialog to close (post published) — real success signal
     const dialogClosed = await page.locator(dialogSel).first()
-      .waitFor({ state: 'detached', timeout: 45000 })
+      .waitFor({ state: 'hidden', timeout: 60000 })
       .then(() => true).catch(() => false);
     if (!dialogClosed) {
       const stillOpen = await page.locator(dialogSel).first().isVisible().catch(() => false);
       if (stillOpen) {
+        console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
         throw new Error('Facebook did not confirm the post (composer still open). Leaving source files for retry.');
       }
     }
-    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(8000).then(() => null)]).catch(() => null);
+    const responsePermalink = await Promise.race([createPostPromise, page.waitForTimeout(30000).then(() => null)]).catch(() => null);
     await page.waitForTimeout(1500);
 
-    return { url: responsePermalink || await resolvePostedFacebookUrl(page, targetUrl, fullText) };
+    const finalUrl = responsePermalink
+      || await resolvePostedFacebookUrl(page, targetUrl, fullText).catch(async (e) => {
+        const fromSource = await extractFacebookPermalinkFromPageSource(page);
+        if (fromSource) return fromSource;
+        console.error('[Facebook] Link resolution diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
+        throw e;
+      });
+    return { url: finalUrl };
   } finally {
     await safeClose(context);
   }
