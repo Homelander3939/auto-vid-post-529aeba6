@@ -311,12 +311,11 @@ async function clickXPostButton(page) {
   const btn = await waitForEnabledXPostButton(page);
   const ariaDisabled = await btn.getAttribute('aria-disabled').catch(() => null);
   const disabled = await btn.isDisabled().catch(() => false);
-  if (ariaDisabled === 'true' || disabled) {
-    throw new Error('X Post button never became enabled. Leaving source files for retry.');
+  let clicked = false;
+  if (ariaDisabled !== 'true' && !disabled) {
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    clicked = await btn.click({ timeout: 10000 }).then(() => true).catch(() => false);
   }
-
-  await btn.scrollIntoViewIfNeeded().catch(() => {});
-  let clicked = await btn.click({ timeout: 10000 }).then(() => true).catch(() => false);
   if (!clicked) clicked = await btn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
   if (!clicked) {
     clicked = await page.evaluate(() => {
@@ -331,6 +330,13 @@ async function clickXPostButton(page) {
       btn.click();
       return true;
     }).catch(() => false);
+  }
+  if (!clicked) {
+    const coords = await waitForXPostButtonCoords(page, 15000);
+    if (coords) {
+      await page.mouse.click(coords.x, coords.y);
+      clicked = true;
+    }
   }
   if (!clicked) {
     const rolePost = page.getByRole('button', { name: /^Post$/ }).last();
@@ -374,9 +380,9 @@ async function getXDiagnostics(page) {
   }).catch((e) => ({ error: e.message }));
 }
 
-async function extractXStatusUrl(page) {
-  const directMatch = page.url().match(/https?:\/\/(?:x|twitter)\.com\/[^/]+\/status\/\d+/);
-  if (directMatch) return directMatch[0].replace(/^https?:\/\/twitter\.com/i, 'https://x.com');
+async function extractXStatusUrl(page, expectedHandle = null) {
+  const direct = normalizeXStatusUrl(page.url(), expectedHandle);
+  if (direct) return direct;
   return await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('[data-testid="toast"] a[href*="/status/"], div[role="alert"] a[href*="/status/"], a[href*="/status/"]'));
     for (const a of anchors) {
@@ -386,7 +392,7 @@ async function extractXStatusUrl(page) {
       if (m) return m[0].replace(/^https?:\/\/twitter\.com/i, 'https://x.com');
     }
     return null;
-  }).catch(() => null);
+  }).then((url) => normalizeXStatusUrl(url, expectedHandle)).catch(() => null);
 }
 
 function xUrlFromCreateTweetPayload(payload, fallbackHandle) {
