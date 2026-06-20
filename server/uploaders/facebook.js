@@ -61,6 +61,66 @@ function extractFacebookPermalinkFromText(raw) {
   return null;
 }
 
+function extractFacebookPermalinkFromPayload(payload) {
+  const seen = new Set();
+  const visit = (value) => {
+    if (value == null) return null;
+    if (typeof value === 'string') {
+      return normalizeFacebookPermalink(value) || extractFacebookPermalinkFromText(value);
+    }
+    if (typeof value !== 'object' || seen.has(value)) return null;
+    seen.add(value);
+    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href']) {
+      const found = visit(value[key]);
+      if (found) return found;
+    }
+    const storyId = value.story_fbid || value.fbid || value.post_id || value.postID || value.legacy_story_hideable_id;
+    const ownerId = value.actor_id || value.page_id || value.profile_id || value.owner_id || value.id;
+    if (storyId && ownerId && String(storyId) !== String(ownerId)) {
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(String(storyId))}&id=${encodeURIComponent(String(ownerId))}`;
+    }
+    for (const item of Array.isArray(value) ? value : Object.values(value)) {
+      const found = visit(item);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(payload);
+}
+
+function waitForFacebookCreatePostResponse(page, timeout = 90000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      page.off('response', onResponse);
+      resolve(value || null);
+    };
+    const timer = setTimeout(() => finish(null), timeout);
+    const onResponse = async (response) => {
+      const url = response.url();
+      if (!/(\/api\/graphql|\/graphql|composer|ufi\/post|create)/i.test(url)) return;
+      if (response.status() >= 400) return;
+      try {
+        const body = await response.text();
+        const fromText = extractFacebookPermalinkFromText(body);
+        if (fromText) return finish(fromText);
+        const cleaned = body.replace(/^for \(;;\);/, '').trim();
+        const chunks = cleaned.split(/\n+/).filter(Boolean);
+        for (const chunk of chunks) {
+          try {
+            const found = extractFacebookPermalinkFromPayload(JSON.parse(chunk));
+            if (found) return finish(found);
+          } catch {}
+        }
+      } catch {}
+    };
+    page.on('response', onResponse);
+  });
+}
+
 async function waitForFacebookMediaReady(page, dialogSel, expectedCount, timeout = 120000) {
   if (!expectedCount) return;
   const deadline = Date.now() + timeout;
