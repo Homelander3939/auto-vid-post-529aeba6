@@ -361,6 +361,20 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
   }, { needle: wanted, mediaCount: expectedMediaCount }).catch(() => -1);
 }
 
+async function waitForFacebookReadyComposer(page, expectedText, expectedMediaCount = 0, timeout = 180000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const readyIndex = await getFacebookReadyComposerIndex(page, expectedText, expectedMediaCount);
+    if (readyIndex >= 0) return readyIndex;
+    if (expectedText && !(await facebookTextExistsInComposer(page, expectedText))) {
+      await insertFacebookTextIntoActiveComposer(page, expectedText, { onlyIfMissing: true }).catch(() => {});
+    }
+    await page.waitForTimeout(1000);
+  }
+  console.error('[Facebook] Ready composer wait diagnostics:', JSON.stringify(await getFacebookDiagnostics(page)));
+  throw new Error('Facebook final composer never became ready with both text and media. Leaving source files for retry.');
+}
+
 async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
   return await page.evaluate((selector) => {
     const visible = (el) => {
