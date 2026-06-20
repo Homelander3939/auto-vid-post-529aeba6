@@ -16,6 +16,8 @@ function normalizeFacebookPermalink(raw) {
   const story = url.searchParams.get('story_fbid') || url.searchParams.get('fbid');
   const owner = url.searchParams.get('id');
   const origin = 'https://www.facebook.com';
+  const combinedPath = path.match(/^\/(\d+)_(\d+)$/);
+  if (combinedPath) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(combinedPath[2])}&id=${encodeURIComponent(combinedPath[1])}`;
   if (story && owner) return `${origin}/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
   if (/\/(?:posts|videos|reel|watch|photo|photos)\//i.test(path)
     || /\/[^/]+\/permalink\//i.test(path)
@@ -71,7 +73,7 @@ function extractFacebookPermalinkFromPayload(payload) {
     }
     if (typeof value !== 'object' || seen.has(value)) return null;
     seen.add(value);
-    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href']) {
+    for (const key of ['permalink_url', 'permalinkUrl', 'shareable_url', 'shareableUrl', 'wwwURL', 'www_url', 'url', 'href', 'share_uri', 'shareURI']) {
       const found = visit(value[key]);
       if (found) return found;
     }
@@ -91,6 +93,39 @@ function extractFacebookPermalinkFromPayload(payload) {
     return null;
   };
   return visit(payload);
+}
+
+async function getFacebookDiagnostics(page, dialogSel = 'div[role="dialog"]') {
+  return await page.evaluate((selector) => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialog = document.querySelector(selector);
+    const root = dialog || document;
+    const buttons = Array.from(root.querySelectorAll('[role="button"], button'))
+      .filter(visible)
+      .map((el) => ({
+        text: (el.innerText || el.textContent || '').trim().slice(0, 50),
+        label: (el.getAttribute('aria-label') || '').slice(0, 80),
+        disabled: el.getAttribute('aria-disabled') || '',
+      }))
+      .filter((b) => /post|next|publish|share/i.test(`${b.text} ${b.label}`))
+      .slice(0, 10);
+    const previews = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).filter(visible).length;
+    const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).filter(visible).length;
+    const textbox = root.querySelector('div[role="textbox"][contenteditable="true"]');
+    return {
+      url: location.href,
+      dialogVisible: Boolean(dialog && visible(dialog)),
+      text: (textbox?.innerText || textbox?.textContent || '').trim().slice(0, 180),
+      previews,
+      busy,
+      buttons,
+      message: (root.innerText || root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 350),
+    };
+  }, dialogSel).catch((e) => ({ error: e.message }));
 }
 
 function waitForFacebookCreatePostResponse(page, timeout = 90000) {
