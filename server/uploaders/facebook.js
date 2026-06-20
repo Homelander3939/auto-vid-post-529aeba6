@@ -362,12 +362,51 @@ async function clickFacebookPostButton(page, dialogSel) {
 
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
-  const dialog = await getActiveFacebookDialogLocator(page);
+  const dialog = await getFacebookComposerDialogLocator(page);
   const state = await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 5000 }).catch(() => '');
   const normalized = normalizePostText(state);
   if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
     throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
   }
+}
+
+async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
+  if (!imageFiles.length) return;
+  const expectedCount = imageFiles.length;
+  let attached = false;
+  const directInputs = [
+    page.locator(`${dialogSel} input[type="file"][accept*="image"]`).last(),
+    page.locator(`${dialogSel} input[type="file"]`).last(),
+    page.locator('input[type="file"][accept*="image"]').last(),
+    page.locator('input[type="file"]').last(),
+  ];
+  for (const input of directInputs) {
+    if (!(await input.count().catch(() => 0))) continue;
+    attached = await input.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false);
+    if (attached) break;
+  }
+
+  if (!attached) {
+    const dialog = await getFacebookComposerDialogLocator(page);
+    const attachBtn = dialog.locator('[aria-label="Photo/video"], [aria-label*="Photo" i], [aria-label*="image" i]').first();
+    await attachBtn.waitFor({ state: 'visible', timeout: 15000 });
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 12000 }).catch(() => null);
+    await attachBtn.click({ force: true }).catch(async () => { await attachBtn.click(); });
+    const chooser = await chooserPromise;
+    if (chooser) {
+      await chooser.setFiles(imageFiles);
+      attached = true;
+    } else {
+      await page.waitForTimeout(1000);
+      const input = page.locator('input[type="file"][accept*="image"], input[type="file"]').last();
+      attached = await input.setInputFiles(imageFiles, { timeout: 15000 }).then(() => true).catch(() => false);
+    }
+  }
+
+  if (!attached) throw new Error('Facebook image picker opened but no controllable file input was found. Leaving source files for retry.');
+  await waitForFacebookMediaReady(page, dialogSel, expectedCount, 180000);
+  await clickFacebookNextSteps(page, 5);
+  await page.waitForTimeout(1500);
 }
 
 async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000) {
