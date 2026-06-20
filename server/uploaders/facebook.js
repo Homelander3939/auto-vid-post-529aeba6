@@ -474,10 +474,8 @@ async function clickFacebookPostButton(page, dialogSel) {
 
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
   const expected = normalizePostText(expectedText).slice(0, 90);
-  const dialog = await getFacebookComposerDialogLocator(page);
-  const state = await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 5000 }).catch(() => '');
-  const normalized = normalizePostText(state);
-  if (expected && !normalized.includes(expected.slice(0, Math.min(45, expected.length)))) {
+  const exists = await facebookTextExistsInComposer(page, expectedText);
+  if (expected && !exists) {
     throw new Error('Facebook composer text was not present before posting. Leaving source files for retry.');
   }
 }
