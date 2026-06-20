@@ -130,6 +130,8 @@ async function getActiveFacebookDialogLocator(page) {
 async function clickFacebookNextSteps(page, maxSteps = 4) {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
+    const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish")').first().isVisible().catch(() => false);
+    if (postVisible) return step > 0;
     const buttons = dialog.locator('[role="button"], button');
     const count = await buttons.count().catch(() => 0);
     let clicked = false;
@@ -533,6 +535,7 @@ async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
   await waitForFacebookMediaReady(page, dialogSel, expectedCount, 180000);
   await clickFacebookNextSteps(page, 5);
   await page.waitForTimeout(1500);
+  await waitForFacebookMediaReady(page, dialogSel, expectedCount, 60000);
 }
 
 async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000) {
