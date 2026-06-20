@@ -282,6 +282,42 @@ async function extractXStatusUrl(page) {
   }).catch(() => null);
 }
 
+function xUrlFromCreateTweetPayload(payload, fallbackHandle) {
+  const create = payload?.data?.create_tweet || payload?.data?.createTweet || payload?.create_tweet;
+  const result = create?.tweet_results?.result || create?.tweet?.result || create?.tweet || null;
+  const id = result?.rest_id || result?.legacy?.id_str || result?.tweet?.rest_id || result?.tweet?.legacy?.id_str;
+  const handle = result?.core?.user_results?.result?.legacy?.screen_name
+    || result?.core?.user_results?.result?.screen_name
+    || fallbackHandle;
+  if (id && handle) return `https://x.com/${handle}/status/${id}`;
+  return null;
+}
+
+function waitForXCreateTweetResponse(page, fallbackHandle, timeout = 90000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      page.off('response', onResponse);
+      resolve(value || null);
+    };
+    const timer = setTimeout(() => finish(null), timeout);
+    const onResponse = async (response) => {
+      const url = response.url();
+      if (!/CreateTweet|graphql/i.test(url)) return;
+      if (response.status() >= 400) return;
+      try {
+        const json = await response.json();
+        const direct = xUrlFromCreateTweetPayload(json, fallbackHandle);
+        if (direct) return finish(direct);
+      } catch {}
+    };
+    page.on('response', onResponse);
+  });
+}
+
 async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -289,6 +325,7 @@ async function waitForXPublishConfirmation(page, textArea, timeout = 45000) {
     if (statusUrl) return { confirmed: true, url: statusUrl };
     const stillVisible = await textArea.isVisible().catch(() => false);
     const toast = await visibleXProblemText(page);
+    if (/exceeded the character limit|upgrade to premium to write longer posts/i.test(toast)) return { confirmed: false, error: toast };
     if (/failed|error|try again|could not|something went wrong/i.test(toast)) return { confirmed: false, error: toast };
     if (!stillVisible || /your post was sent|posted|view/i.test(toast)) return { confirmed: true, url: null };
     await page.waitForTimeout(750);
