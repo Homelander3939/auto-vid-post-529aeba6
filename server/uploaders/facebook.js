@@ -679,6 +679,52 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
   throw new Error(`Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes${lastState?.text ? `: ${lastState.text.slice(0, 220)}` : ''}. Leaving source files for retry.`);
 }
 
+async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText = '', timeout = 420000) {
+  const deadline = Date.now() + timeout;
+  const expected = normalizePostText(expectedText).slice(0, 70);
+  let idleReadySince = 0;
+  while (Date.now() < deadline) {
+    const direct = normalizeFacebookPermalink(page.url());
+    if (direct) return { confirmed: true, url: direct };
+    const activeIndex = await getActiveFacebookDialogIndex(page);
+    const state = await page.evaluate(({ selector, dialogIndex, needle }) => {
+      const dialogs = Array.from(document.querySelectorAll(selector));
+      const dialog = dialogIndex >= 0 ? dialogs[dialogIndex] : (dialogs[dialogs.length - 1] || null);
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const root = dialog || document;
+      const text = (root.innerText || root.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 1200);
+      const busy = Array.from(root.querySelectorAll('[role="progressbar"], [aria-busy="true"], [aria-label*="Posting" i], [aria-label*="Uploading" i], [aria-label*="Processing" i]')).some(visible);
+      const postButtonVisible = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const label = (btn.getAttribute('aria-label') || '').trim();
+        const body = (btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish)$/i.test(label || body);
+      });
+      const seePostVisible = Array.from(root.querySelectorAll('a, [role="button"], button')).some((el) => visible(el) && /^(see|view) post$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()));
+      return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
+    }, { selector: dialogSel, dialogIndex: activeIndex, needle: expected }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, seePostVisible: false, hasExpectedText: true, text: '' }));
+    if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
+      return { confirmed: false, error: state.text.slice(0, 300) };
+    }
+    if (!state.dialogVisible || state.seePostVisible || (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || ''))) {
+      return { confirmed: true, url: null };
+    }
+    if (state.postButtonVisible && state.hasExpectedText && !state.busy) {
+      if (!idleReadySince) idleReadySince = Date.now();
+      if (Date.now() - idleReadySince > 15000) return { confirmed: false, retry: true, error: 'Facebook Post button stayed open after click.' };
+    } else {
+      idleReadySince = 0;
+    }
+    await page.waitForTimeout(1000);
+  }
+  return { confirmed: false, retry: true, error: `Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes.` };
+}
+
 async function extractFacebookPermalinkFromArticles(page, snippet = '') {
   return await page.evaluate((rawSnippet) => {
     const normalizeUrl = (raw) => {
