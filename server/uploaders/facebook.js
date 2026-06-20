@@ -127,11 +127,16 @@ async function getActiveFacebookDialogLocator(page) {
   return dialogs.nth(safeIndex);
 }
 
-async function clickFacebookNextSteps(page, maxSteps = 4) {
+async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
     const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish")').first().isVisible().catch(() => false);
     if (postVisible) return step > 0;
+    const expected = normalizePostText(expectedText).slice(0, 45);
+    if (expected) {
+      const activeText = normalizePostText(await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 1000 }).catch(() => ''));
+      if (activeText.includes(expected)) return step > 0;
+    }
     const buttons = dialog.locator('[role="button"], button');
     const count = await buttons.count().catch(() => 0);
     let clicked = false;
@@ -567,7 +572,7 @@ async function verifyFacebookComposerHasMedia(page, expectedCount) {
   }
 }
 
-async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
+async function attachImagesToFacebookComposer(page, imageFiles, dialogSel, expectedText = '') {
   if (!imageFiles.length) return;
   const expectedCount = imageFiles.length;
   let attached = false;
@@ -602,7 +607,7 @@ async function attachImagesToFacebookComposer(page, imageFiles, dialogSel) {
 
   if (!attached) throw new Error('Facebook image picker opened but no controllable file input was found. Leaving source files for retry.');
   await waitForFacebookMediaReady(page, dialogSel, expectedCount, 180000);
-  await clickFacebookNextSteps(page, 5);
+  await clickFacebookNextSteps(page, 5, expectedText);
   await page.waitForTimeout(1500);
   await waitForFacebookMediaReady(page, dialogSel, expectedCount, 60000);
 }
@@ -966,7 +971,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     await page.waitForTimeout(400);
 
     if (imageFiles.length) {
-      await attachImagesToFacebookComposer(page, imageFiles, dialogSel);
+      await attachImagesToFacebookComposer(page, imageFiles, dialogSel, fullText);
     }
 
     // Some Facebook media flows clear/hide text after the media editor closes.
