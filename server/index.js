@@ -1934,6 +1934,15 @@ function normalizePlatformName(p) {
   return null;
 }
 
+// Strip useless baked-in prefixes like "TechPulse: 1. Gaming:" from manifest text.
+// These prefixes waste characters (especially on X) and add no value.
+function stripTechPulsePrefix(text) {
+  return String(text || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:]+\s*:\s*/, '')
+    .trim();
+}
+
 // Scan a folder, return parsed bundles. Each entry includes raw image bytes so
 // the caller can either base64-encode them (browser scan) or upload them to
 // Supabase storage (recurring schedule processor).
