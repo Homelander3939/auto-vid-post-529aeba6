@@ -573,8 +573,9 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     });
     await page.waitForTimeout(800);
 
-    // Dismiss any hashtag autocomplete popover that may be intercepting clicks
-    await page.keyboard.press('Escape').catch(() => {});
+    // Do not press Escape here: on Facebook it can close the composer/draft
+    // instead of only closing hashtag autocomplete. We keep the dialog open and
+    // click the scoped Post button directly.
     await page.waitForTimeout(300);
 
     if (imageFiles.length) {
@@ -589,8 +590,6 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       await waitForFacebookMediaReady(page, dialogSel, imageFiles.length, 120000);
     }
 
-    // Dismiss popovers again before clicking buttons
-    await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(400);
 
     // Some FB flows show "Next" before Post (e.g. when media is attached or for Pages)
@@ -603,22 +602,12 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     }
 
     const createPostPromise = waitForFacebookCreatePostResponse(page, 180000);
+    await verifyFacebookComposerHasText(page, dialogSel, fullText);
     await clickFacebookPostButton(page, dialogSel);
 
-    // Wait for the composer to actually close — that is Facebook's real
-    // "post succeeded" signal. The publish spinner ("rolling around loading
-    // long time") can run for well over a minute on slow accounts, so give
-    // it a generous window instead of bailing early.
-    const dialogClosed = await page.locator(dialogSel).first()
-      .waitFor({ state: 'hidden', timeout: 180000 })
-      .then(() => true).catch(() => false);
-    if (!dialogClosed) {
-      const stillOpen = await page.locator(dialogSel).first().isVisible().catch(() => false);
-      if (stillOpen) {
-        console.error('[Facebook] Composer still open diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
-        throw new Error('Facebook did not confirm the post (composer still spinning after 3 minutes). Leaving source files for retry.');
-      }
-    }
+    // Wait for the composer/spinner to fully finish. Facebook Page posts can
+    // keep rolling for several minutes; do not close or resolve early.
+    await waitForFacebookComposerToFinish(page, dialogSel, 420000);
 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
