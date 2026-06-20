@@ -130,7 +130,7 @@ async function getActiveFacebookDialogLocator(page) {
 async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
   for (let step = 0; step < maxSteps; step++) {
     const dialog = await getActiveFacebookDialogLocator(page);
-    const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish")').first().isVisible().catch(() => false);
+    const postVisible = await dialog.locator('[aria-label="Post"][role="button"], [aria-label="Publish"][role="button"], [aria-label="Share"][role="button"], div[role="button"]:has-text("Post"):not(:has-text("Postpone")), div[role="button"]:has-text("Publish"), div[role="button"]:has-text("Share")').first().isVisible().catch(() => false);
     if (postVisible) return step > 0;
     const expected = normalizePostText(expectedText).slice(0, 45);
     if (expected) {
@@ -165,7 +165,7 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
       const label = (await btn.getAttribute('aria-label').catch(() => '') || '').trim();
       const body = (await btn.innerText().catch(() => '') || '').trim();
       const name = label || body;
-      if (!/^(next|done|continue)$/i.test(name)) continue;
+      if (!/^(next|done|continue|save|add)$/i.test(name)) continue;
       await btn.scrollIntoViewIfNeeded().catch(() => {});
       clicked = await btn.click({ timeout: 8000 }).then(() => true).catch(() => false);
       if (!clicked) clicked = await btn.click({ force: true, timeout: 8000 }).then(() => true).catch(() => false);
