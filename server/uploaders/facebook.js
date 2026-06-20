@@ -136,10 +136,11 @@ async function facebookComposerOpen(page, dialogSel = 'div[role="dialog"]') {
       return r.width > 80 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
     };
     const isComposerTextbox = (el) => {
-      const root = el.closest('form, main, [role="main"]') || document;
+      const root = el.closest('[role="dialog"], form, main, [role="main"]') || document;
       const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('aria-placeholder') || ''} ${el.getAttribute('placeholder') || ''} ${el.innerText || el.textContent || ''} ${root.innerText || root.textContent || ''}`;
       if (/search|comment|reply|message/i.test(label)) return false;
-      return /what.*mind|say something|write something|create post|post text|caption|compose/i.test(label)
+      if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|add a caption/i.test(label) && !/create post|what.*mind|write something|say something/i.test(label)) return false;
+      return /what.*mind|say something|write something|create post|post text|compose/i.test(label)
         || (el.getAttribute('role') === 'textbox' && el.getAttribute('contenteditable') === 'true' && /\b(post|publish|share)\b/i.test(label));
     };
     const hasDialogComposer = Array.from(document.querySelectorAll(selector)).some((dialog) => visible(dialog)
