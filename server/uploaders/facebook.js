@@ -1232,6 +1232,18 @@ async function tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, b
     }
 
     if (!state.textareas || (imageFiles.length && !state.fileInputs && !mediaAttached)) {
+      if (textWritten && mediaAttached && state.hasSubmit) {
+        const clicked = await clickFacebookBasicSubmit(page);
+        if (clicked) {
+          submitted = true;
+          await page.waitForTimeout(3500);
+          const direct = normalizeFacebookPermalink(page.url());
+          if (direct && !(baselinePermalinks || []).includes(direct)) return direct;
+          const resolved = await resolvePostedFacebookUrl(page, targetUrl, fullText, baselinePermalinks).catch(() => null);
+          if (resolved) return resolved;
+          continue;
+        }
+      }
       const opened = await clickFacebookBasicEntry(page, imageFiles.length > 0 && !mediaAttached);
       if (opened) {
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
