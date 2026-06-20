@@ -296,15 +296,18 @@ async function getFacebookComposerDialogIndex(page) {
     };
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
     const candidates = dialogs.map((dialog, index) => {
+      const dialogText = (dialog.innerText || dialog.textContent || '').trim();
       const textboxes = Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible).length;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
         const body = (btn.innerText || btn.textContent || '').trim();
         return visible(btn) && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
+      const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
+      const looksLikePhotoViewer = /cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText);
       const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
-      return { index, textboxes, hasPost, z: Number.isFinite(z) ? z : 0 };
-    }).filter((item) => visible(dialogs[item.index]) && (item.textboxes > 0 || item.hasPost));
+      return { index, textboxes, hasPost, looksLikeComposer, looksLikePhotoViewer, z: Number.isFinite(z) ? z : 0 };
+    }).filter((item) => visible(dialogs[item.index]) && (item.hasPost || (item.textboxes > 0 && item.looksLikeComposer)) && !item.looksLikePhotoViewer);
     if (!candidates.length) return -1;
     candidates.sort((a, b) => ((a.hasPost ? 1 : 0) - (b.hasPost ? 1 : 0)) || (a.textboxes - b.textboxes) || (a.z - b.z) || (a.index - b.index));
     return candidates[candidates.length - 1].index;
