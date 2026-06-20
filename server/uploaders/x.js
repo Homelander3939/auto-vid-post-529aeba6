@@ -624,16 +624,18 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       // it. Refuse to click Post on an empty textbox — that's how we ended up
       // posting media-only tweets previously.
       const currentText = await readComposerText();
-      if (!currentText) {
+      const currentNeedle = postedText.replace(/\s+/g, ' ').slice(0, Math.min(80, postedText.length));
+      if (!currentText || (currentNeedle && !currentText.replace(/\s+/g, ' ').includes(currentNeedle))) {
         await textArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
         await insertXText(page, textArea, postedText);
         await page.waitForTimeout(800);
         const recheck = await readComposerText();
-        if (!recheck) {
-          throw new Error('X composer lost its text before posting and could not be refilled. Leaving source files for retry.');
+        if (!recheck || (currentNeedle && !recheck.replace(/\s+/g, ' ').includes(currentNeedle))) {
+          throw new Error('X composer lost or changed its text before posting and could not be refilled. Leaving source files for retry.');
         }
       }
 
+      await verifyXComposerHasText(page, postedText, 15000);
       const createTweetPromise = waitForXCreateTweetResponse(page, myHandle, 90000);
       await clickXPostButton(page);
       let result = await waitForXPublishConfirmation(page, textArea, 22000, myHandle);
