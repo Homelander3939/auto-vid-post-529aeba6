@@ -79,7 +79,7 @@ function cleanupSourceFiles(sourceMeta, shouldClean) {
   const folder = normalizeLocalFolderPath(src.folder);
 
   if (!shouldClean) {
-    return `\n\n🧹 Source files kept in ${cleanTelegramText(folder || src.folder, 120)} because no selected platform confirmed successfully.`;
+    return `\n\n🧹 Source files kept in ${cleanTelegramText(folder || src.folder, 120)} because not every selected platform confirmed successfully.`;
   }
 
   const names = new Set(src.files.map((name) => path.basename(String(name || ''))).filter(Boolean));
