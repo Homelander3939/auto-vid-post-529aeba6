@@ -1517,6 +1517,8 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   if (fromSeePost) return fromSeePost;
 
   await page.waitForTimeout(2500);
+  const copiedViaShare = fresh(await copyFacebookLinkViaShareDialog(page, snippet));
+  if (copiedViaShare) return copiedViaShare;
   const copied = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
   if (copied) return copied;
   const onCurrentPage = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
@@ -1535,6 +1537,8 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
       if (matchingCandidate) return fresh(matchingCandidate.url);
       const anyFreshCandidate = candidates.find((item) => fresh(item?.url) && item?.fresh);
       if (!wanted && anyFreshCandidate) return fresh(anyFreshCandidate.url);
+      const copiedViaShareAfterNav = fresh(await copyFacebookLinkViaShareDialog(page, snippet));
+      if (copiedViaShareAfterNav) return copiedViaShareAfterNav;
       const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
