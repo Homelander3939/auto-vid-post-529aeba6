@@ -1,5 +1,6 @@
 // Facebook post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
+const { dismissOverlayBlockingFlow } = require("./overlay-dismiss");
 
 function normalizeFacebookPermalink(raw) {
   if (!raw) return null;
@@ -250,10 +251,6 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
     }).catch(() => false);
     if (postVisible) return step > 0;
     const expected = normalizePostText(expectedText).slice(0, 45);
-    if (expected) {
-      const activeText = normalizePostText(await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 1000 }).catch(() => ''));
-      if (activeText.includes(expected)) return step > 0;
-    }
     const canAdvance = await dialog.evaluate((root, expectedNeedle) => {
       const visible = (el) => {
         if (!el) return false;
@@ -263,17 +260,19 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
       };
       const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
       const text = (root.innerText || root.textContent || '').trim();
-      const hasExpectedText = expectedNeedle && normalize(text).includes(expectedNeedle);
-      if (hasExpectedText) return false;
       const hasReadyPostBtn = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
         const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(name) && /^(post|publish|share)$/i.test(name);
       });
       if (hasReadyPostBtn) return false;
+      const hasNextButton = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && /^(next|done|continue)$/i.test(name);
+      });
       const hasMedia = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).some(visible);
       const looksLikeMediaEditor = /edit|crop|move|photo|image|media|preview|layout|caption|next|done|continue/i.test(text);
       const looksLikeFinalComposer = /what.*mind|create post|say something|write something/i.test(text);
-      return hasMedia || (looksLikeMediaEditor && !looksLikeFinalComposer);
+      return hasNextButton || hasMedia || (looksLikeMediaEditor && !looksLikeFinalComposer) || Boolean(expectedNeedle && normalize(text).includes(expectedNeedle) && /next/i.test(text));
     }, expected).catch(() => true);
     if (!canAdvance) return step > 0;
     const buttons = dialog.locator('[role="button"], button');
@@ -463,6 +462,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
     for (const dialog of dialogs) {
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const normalizedDialogText = normalize(dialogText);
       const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
       if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) continue;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
@@ -470,6 +470,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
         const body = (btn.innerText || btn.textContent || '').trim();
         return visible(btn) && /^(post|publish|share)$/i.test(label || body);
       });
+      if (normalizedDialogText.includes(needle) && hasPost) return true;
       for (const textbox of Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible)) {
         const text = normalize(textbox.innerText || textbox.textContent || '');
         if (text.includes(needle) && (hasPost || textbox.getBoundingClientRect().width > 200)) return true;
@@ -503,12 +504,15 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       if (!hasPost) return;
-      const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
+      const normalizedDialogText = normalize(dialogText);
+      const textOk = !needle || normalizedDialogText.includes(needle) || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
       if (!textOk) return;
-      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter((el) => {
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img, img')).filter((el) => {
         if (!visible(el)) return false;
         const r = el.getBoundingClientRect();
-        return r.width > 40 && r.height > 40;
+        const alt = `${el.getAttribute('alt') || ''} ${el.getAttribute('aria-label') || ''} ${el.closest('[aria-label], [role="article"], div')?.getAttribute?.('aria-label') || ''}`;
+        if (/profile|avatar|emoji|sticker|icon/i.test(alt) && r.width < 180 && r.height < 180) return false;
+        return r.width > 80 && r.height > 60;
       }).length;
       if (mediaCount > 0 && previews < 1) return;
       const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
@@ -763,7 +767,13 @@ async function verifyFacebookComposerHasMedia(page, expectedCount) {
       const s = window.getComputedStyle(el);
       return r.width > 40 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
     };
-    return Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter(visible).length;
+    return Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img, img')).filter((el) => {
+      if (!visible(el)) return false;
+      const r = el.getBoundingClientRect();
+      const alt = `${el.getAttribute('alt') || ''} ${el.getAttribute('aria-label') || ''} ${el.closest('[aria-label], [role="article"], div')?.getAttribute?.('aria-label') || ''}`;
+      if (/profile|avatar|emoji|sticker|icon/i.test(alt) && r.width < 180 && r.height < 180) return false;
+      return r.width > 80 && r.height > 60;
+    }).length;
   }).catch(() => 0);
   if (previews < Math.min(expectedCount, 1)) {
     throw new Error('Facebook media preview was not present in the final composer before posting. Leaving source files for retry.');
@@ -856,6 +866,48 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
   throw new Error(`Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes${lastState?.text ? `: ${lastState.text.slice(0, 220)}` : ''}. Leaving source files for retry.`);
 }
 
+async function dismissFacebookPostPublishPrompts(page, timeout = 45000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const dismissed = await page.evaluate(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+      for (let i = dialogs.length - 1; i >= 0; i--) {
+        const dialog = dialogs[i];
+        const text = (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(text)) continue;
+        const buttons = Array.from(dialog.querySelectorAll('[role="button"], button, a'));
+        const target = buttons.find((el) => visible(el) && /^(not now|skip|done|close|×|x)$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()))
+          || buttons.find((el) => visible(el) && /close/i.test(el.getAttribute('aria-label') || ''));
+        if (target) {
+          target.click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+    if (!dismissed) {
+      const blockingPrompt = await page.evaluate(() => {
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+        };
+        return Array.from(document.querySelectorAll('div[role="dialog"]')).some((dialog) => visible(dialog)
+          && /whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(dialog.innerText || dialog.textContent || ''));
+      }).catch(() => false);
+      if (!blockingPrompt) return;
+    }
+    await page.waitForTimeout(1200);
+  }
+}
+
 async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText = '', timeout = 420000) {
   const deadline = Date.now() + timeout;
   const expected = normalizePostText(expectedText).slice(0, 70);
@@ -883,12 +935,13 @@ async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText 
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const seePostVisible = Array.from(root.querySelectorAll('a, [role="button"], button')).some((el) => visible(el) && /^(see|view) post$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()));
-      return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
+      const postPublishPrompt = /whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(text) && !postButtonVisible;
+      return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, postPublishPrompt, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
     }, { selector: dialogSel, dialogIndex: activeIndex, needle: expected }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, seePostVisible: false, hasExpectedText: true, text: '' }));
     if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
       return { confirmed: false, error: state.text.slice(0, 300) };
     }
-    if (!state.dialogVisible || state.seePostVisible || (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || ''))) {
+    if (!state.dialogVisible || state.seePostVisible || state.postPublishPrompt || (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || ''))) {
       return { confirmed: true, url: null };
     }
     if (state.postButtonVisible && state.hasExpectedText && !state.busy) {
@@ -1115,6 +1168,25 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
     const article = articles.nth(i);
     const body = normalizePostText(await article.innerText({ timeout: 3000 }).catch(() => ''));
     if (wanted && i > 0 && !body.includes(wanted.slice(0, Math.min(28, wanted.length))) && !/just now|\b1m\b|\b2m\b/i.test(body)) continue;
+
+    // Try "Share" -> "Copy link" first (Modern Desktop flow)
+    const shareBtn = article.locator('[aria-label*="Share" i], [role="button"]:has-text("Share"), span:has-text("Share")').first();
+    if (await shareBtn.isVisible().catch(() => false)) {
+      await shareBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await shareBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(1500);
+      const copyBtn = page.locator('[role="menuitem"]:has-text("Copy link"), [role="button"]:has-text("Copy link"), span:has-text("Copy link")').first();
+      if (await copyBtn.isVisible().catch(() => false)) {
+        await copyBtn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(1000);
+        const clipped = await page.evaluate(() => navigator.clipboard?.readText?.()).catch(() => null);
+        const normalized = normalizeFacebookPermalink(clipped) || extractFacebookPermalinkFromText(clipped);
+        if (normalized) return normalized;
+      }
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
     const menu = article.locator('[aria-label*="Actions for this post" i], [aria-label="More"][role="button"], [aria-label*="More options" i][role="button"], [aria-label*="Open Menu" i][role="button"], div[aria-haspopup="menu"][role="button"]').last();
     if (!(await menu.isVisible().catch(() => false))) {
       const href = await article.locator('a[href*="story_fbid="], a[href*="/posts/"], a[href*="/permalink/"], a[href*="/groups/"][href*="/posts/"], a[href*="/share/"]').first().getAttribute('href').catch(() => null);
@@ -1142,6 +1214,35 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
       if (normalized) return normalized;
     }
     await page.keyboard.press('Escape').catch(() => {});
+  }
+  return null;
+}
+
+async function copyFacebookLinkViaShareDialog(page, snippet = '') {
+  const wanted = normalizePostText(snippet).slice(0, 45);
+  const articles = page.locator('[role="article"]');
+  const count = Math.min(await articles.count().catch(() => 0), 8);
+  for (let i = 0; i < count; i++) {
+    const article = articles.nth(i);
+    const body = normalizePostText(await article.innerText({ timeout: 3000 }).catch(() => ''));
+    if (wanted && i > 0 && !body.includes(wanted.slice(0, Math.min(28, wanted.length))) && !/just now|now|\b\d+\s*(m|min|mins|minute|minutes)\b/i.test(body)) continue;
+
+    const share = article.locator('[aria-label="Share"][role="button"], div[role="button"]:has-text("Share"), span:has-text("Share")').last();
+    if (!(await share.isVisible().catch(() => false))) continue;
+    await share.scrollIntoViewIfNeeded().catch(() => {});
+    await share.click({ force: true, timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+
+    const copy = page.locator('div[role="dialog"] [role="button"]:has-text("Copy link"), div[role="dialog"] span:has-text("Copy link"), [role="menuitem"]:has-text("Copy link")').last();
+    if (await copy.isVisible().catch(() => false)) {
+      await copy.click({ force: true, timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+      const clipped = await page.evaluate(() => navigator.clipboard?.readText?.()).catch(() => null);
+      const normalized = normalizeFacebookPermalink(clipped) || extractFacebookPermalinkFromText(clipped);
+      if (normalized) return normalized;
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(500);
   }
   return null;
 }
@@ -1420,6 +1521,8 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   if (fromSeePost) return fromSeePost;
 
   await page.waitForTimeout(2500);
+  const copiedViaShare = fresh(await copyFacebookLinkViaShareDialog(page, snippet));
+  if (copiedViaShare) return copiedViaShare;
   const copied = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
   if (copied) return copied;
   const onCurrentPage = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
@@ -1430,6 +1533,7 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   urlsToScan.push('https://www.facebook.com/me');
   for (const scanUrl of urlsToScan) {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await dismissOverlayBlockingFlow(page, { logPrefix: "[Facebook Post]" }).catch(() => {});
     for (let attempt = 0; attempt < 20; attempt++) {
       await page.waitForTimeout(4000 + Math.min(attempt, 8) * 1500);
       const candidates = await fetchRecentFacebookPostCandidates(page, scanUrl, 10, 1000).catch(() => []);
@@ -1437,6 +1541,8 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
       if (matchingCandidate) return fresh(matchingCandidate.url);
       const anyFreshCandidate = candidates.find((item) => fresh(item?.url) && item?.fresh);
       if (!wanted && anyFreshCandidate) return fresh(anyFreshCandidate.url);
+      const copiedViaShareAfterNav = fresh(await copyFacebookLinkViaShareDialog(page, snippet));
+      if (copiedViaShareAfterNav) return copiedViaShareAfterNav;
       const copiedAfterNav = fresh(await copyFacebookLinkFromTopArticle(page, snippet));
       if (copiedAfterNav) return copiedAfterNav;
       const permalink = fresh(await extractFacebookPermalinkFromArticles(page, snippet));
@@ -1492,18 +1598,9 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
       : (description || '');
 
-    // Prefer Facebook's lightweight/basic composer first. It is server-rendered,
-    // uses stable textarea/file-input/form controls, and avoids the modern SPA's
-    // nested popups where text/media can land in different dialogs.
-    const basicUrl = await tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks).catch((e) => {
-      if (/requires login|rejected|may have been submitted|exact post link/i.test(e.message || '')) throw e;
-      console.warn('[Facebook] Basic composer fallback unavailable:', e.message);
-      return null;
-    });
-    if (basicUrl) {
-      await verifyPostedFacebookUrlContainsText(page, basicUrl, fullText);
-      return { url: basicUrl };
-    }
+    // Follow the verified Page UI flow from the screenshots exactly:
+    // composer → text/photo → Next → Post → dismiss prompts → Share → Copy link.
+    // Do not use basic/mobile fallbacks here; they can land on unrelated cover/photo surfaces.
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(1500);
@@ -1563,6 +1660,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
     await page.waitForTimeout(8000);
+    await dismissFacebookPostPublishPrompts(page).catch(() => {});
     const baselineSet = new Set(baselinePermalinks);
     const normalizedResponsePermalink = normalizeFacebookPermalink(publishedUrl) || normalizeFacebookPermalink(responsePermalink);
     const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
