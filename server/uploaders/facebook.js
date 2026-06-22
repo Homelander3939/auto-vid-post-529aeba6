@@ -1,5 +1,6 @@
 // Facebook post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
+const { dismissOverlayBlockingFlow } = require("./overlay-dismiss");
 
 function normalizeFacebookPermalink(raw) {
   if (!raw) return null;
@@ -250,10 +251,6 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
     }).catch(() => false);
     if (postVisible) return step > 0;
     const expected = normalizePostText(expectedText).slice(0, 45);
-    if (expected) {
-      const activeText = normalizePostText(await dialog.locator('div[role="textbox"][contenteditable="true"]').first().innerText({ timeout: 1000 }).catch(() => ''));
-      if (activeText.includes(expected)) return step > 0;
-    }
     const canAdvance = await dialog.evaluate((root, expectedNeedle) => {
       const visible = (el) => {
         if (!el) return false;
@@ -263,17 +260,19 @@ async function clickFacebookNextSteps(page, maxSteps = 4, expectedText = '') {
       };
       const normalize = (value) => String(value || '').toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/#\w+/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
       const text = (root.innerText || root.textContent || '').trim();
-      const hasExpectedText = expectedNeedle && normalize(text).includes(expectedNeedle);
-      if (hasExpectedText) return false;
       const hasReadyPostBtn = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
         const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(name) && /^(post|publish|share)$/i.test(name);
       });
       if (hasReadyPostBtn) return false;
+      const hasNextButton = Array.from(root.querySelectorAll('[role="button"], button')).some((btn) => {
+        const name = (btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '').trim();
+        return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && /^(next|done|continue)$/i.test(name);
+      });
       const hasMedia = Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img')).some(visible);
       const looksLikeMediaEditor = /edit|crop|move|photo|image|media|preview|layout|caption|next|done|continue/i.test(text);
       const looksLikeFinalComposer = /what.*mind|create post|say something|write something/i.test(text);
-      return hasMedia || (looksLikeMediaEditor && !looksLikeFinalComposer);
+      return hasNextButton || hasMedia || (looksLikeMediaEditor && !looksLikeFinalComposer) || Boolean(expectedNeedle && normalize(text).includes(expectedNeedle) && /next/i.test(text));
     }, expected).catch(() => true);
     if (!canAdvance) return step > 0;
     const buttons = dialog.locator('[role="button"], button');
@@ -1112,9 +1111,30 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const count = Math.min(await articles.count().catch(() => 0), 5);
   const wanted = normalizePostText(snippet).slice(0, 45);
   for (let i = 0; i < count; i++) {
+  for (let i = 0; i < count; i++) {
     const article = articles.nth(i);
     const body = normalizePostText(await article.innerText({ timeout: 3000 }).catch(() => ''));
     if (wanted && i > 0 && !body.includes(wanted.slice(0, Math.min(28, wanted.length))) && !/just now|\b1m\b|\b2m\b/i.test(body)) continue;
+
+    // Try "Share" -> "Copy link" first (Modern Desktop flow)
+    const shareBtn = article.locator('[aria-label*="Share" i], [role="button"]:has-text("Share"), span:has-text("Share")').first();
+    if (await shareBtn.isVisible().catch(() => false)) {
+      await shareBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await shareBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(1500);
+      const copyBtn = page.locator('[role="menuitem"]:has-text("Copy link"), [role="button"]:has-text("Copy link"), span:has-text("Copy link")').first();
+      if (await copyBtn.isVisible().catch(() => false)) {
+        await copyBtn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(1000);
+        const clipped = await page.evaluate(() => navigator.clipboard?.readText?.()).catch(() => null);
+        const normalized = normalizeFacebookPermalink(clipped) || extractFacebookPermalinkFromText(clipped);
+        if (normalized) return normalized;
+      }
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    const menu = article.locator('[aria-label*="Actions for this post" i], [aria-label="More"][role="button"], [aria-label*="More options" i][role="button"], [aria-label*="Open Menu" i][role="button"], div[aria-haspopup="menu"][role="button"]').last();
     const menu = article.locator('[aria-label*="Actions for this post" i], [aria-label="More"][role="button"], [aria-label*="More options" i][role="button"], [aria-label*="Open Menu" i][role="button"], div[aria-haspopup="menu"][role="button"]').last();
     if (!(await menu.isVisible().catch(() => false))) {
       const href = await article.locator('a[href*="story_fbid="], a[href*="/posts/"], a[href*="/permalink/"], a[href*="/groups/"][href*="/posts/"], a[href*="/share/"]').first().getAttribute('href').catch(() => null);
@@ -1430,6 +1450,7 @@ async function resolvePostedFacebookUrl(page, targetUrl = null, snippet = '', ba
   urlsToScan.push('https://www.facebook.com/me');
   for (const scanUrl of urlsToScan) {
     await page.goto(scanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await dismissOverlayBlockingFlow(page, { logPrefix: "[Facebook Post]" }).catch(() => {});
     for (let attempt = 0; attempt < 20; attempt++) {
       await page.waitForTimeout(4000 + Math.min(attempt, 8) * 1500);
       const candidates = await fetchRecentFacebookPostCandidates(page, scanUrl, 10, 1000).catch(() => []);
@@ -1495,8 +1516,8 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Prefer Facebook's lightweight/basic composer first. It is server-rendered,
     // uses stable textarea/file-input/form controls, and avoids the modern SPA's
     // nested popups where text/media can land in different dialogs.
-    const basicUrl = await tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks).catch((e) => {
-      if (/requires login|rejected|may have been submitted|exact post link/i.test(e.message || '')) throw e;
+    // Force modern flow: skipping basic composer fallback as requested
+    const basicUrl = null; /* await tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks) */
       console.warn('[Facebook] Basic composer fallback unavailable:', e.message);
       return null;
     });
@@ -1563,6 +1584,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
     await page.waitForTimeout(8000);
+    await dismissOverlayBlockingFlow(page, { logPrefix: "[Facebook Post-Submit]" }).catch(() => {});
     const baselineSet = new Set(baselinePermalinks);
     const normalizedResponsePermalink = normalizeFacebookPermalink(publishedUrl) || normalizeFacebookPermalink(responsePermalink);
     const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
