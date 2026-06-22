@@ -502,12 +502,15 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       if (!hasPost) return;
-      const textOk = !needle || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
+      const normalizedDialogText = normalize(dialogText);
+      const textOk = !needle || normalizedDialogText.includes(needle) || Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((textbox) => visible(textbox) && normalize(textbox.innerText || textbox.textContent || '').includes(needle));
       if (!textOk) return;
-      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter((el) => {
+      const previews = Array.from(dialog.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img, img')).filter((el) => {
         if (!visible(el)) return false;
         const r = el.getBoundingClientRect();
-        return r.width > 40 && r.height > 40;
+        const alt = `${el.getAttribute('alt') || ''} ${el.getAttribute('aria-label') || ''} ${el.closest('[aria-label], [role="article"], div')?.getAttribute?.('aria-label') || ''}`;
+        if (/profile|avatar|emoji|sticker|icon/i.test(alt) && r.width < 180 && r.height < 180) return false;
+        return r.width > 80 && r.height > 60;
       }).length;
       if (mediaCount > 0 && previews < 1) return;
       const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
