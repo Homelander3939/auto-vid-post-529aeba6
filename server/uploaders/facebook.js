@@ -148,6 +148,17 @@ async function facebookComposerOpen(page, dialogSel = 'div[role="dialog"]') {
     const hasDialogComposer = Array.from(document.querySelectorAll(selector)).some((dialog) => visible(dialog)
       && Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).some((el) => visible(el) && isComposerTextbox(el)));
     if (hasDialogComposer) return true;
+    // Facebook sometimes mounts the first Create Post popup before exposing the
+    // editable node as role="textbox". Treat that visible modal as open so the
+    // retry loop never clicks the dimmed page behind it and closes the popup.
+    const hasVisibleCreatePostDialog = Array.from(document.querySelectorAll(selector)).some((dialog) => {
+      if (!visible(dialog)) return false;
+      const text = (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim();
+      const wrongSurface = /cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(text);
+      const createPostSurface = /create post/i.test(text) && /(what.*mind|write something|say something|add to your post|photo\/video|next|post)/i.test(text);
+      return createPostSurface && !wrongSurface;
+    });
+    if (hasVisibleCreatePostDialog) return true;
     return Array.from(document.querySelectorAll('main div[role="textbox"][contenteditable="true"], form textarea, main textarea'))
       .some((el) => visible(el) && isComposerTextbox(el));
   }, dialogSel).catch(() => false);
@@ -260,6 +271,7 @@ async function clickFacebookModernComposerEntry(page, needsMedia = false) {
   for (let attempt = 0; attempt < 8; attempt++) {
     if (await facebookComposerOpen(page)) return true;
     await closeFacebookNonComposerDialogs(page);
+    if (await facebookComposerOpen(page)) return true;
     if (await clickFacebookMarkedComposerBox(page)) return true;
     await page.waitForTimeout(1200);
   }
