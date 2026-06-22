@@ -767,7 +767,13 @@ async function verifyFacebookComposerHasMedia(page, expectedCount) {
       const s = window.getComputedStyle(el);
       return r.width > 40 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
     };
-    return Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img')).filter(visible).length;
+    return Array.from(root.querySelectorAll('img[src^="blob:"], video[src^="blob:"], [style*="blob:"], [aria-label*="Photo" i] img, [aria-label*="image" i] img, [class*="x168nmei"] img, img')).filter((el) => {
+      if (!visible(el)) return false;
+      const r = el.getBoundingClientRect();
+      const alt = `${el.getAttribute('alt') || ''} ${el.getAttribute('aria-label') || ''} ${el.closest('[aria-label], [role="article"], div')?.getAttribute?.('aria-label') || ''}`;
+      if (/profile|avatar|emoji|sticker|icon/i.test(alt) && r.width < 180 && r.height < 180) return false;
+      return r.width > 80 && r.height > 60;
+    }).length;
   }).catch(() => 0);
   if (previews < Math.min(expectedCount, 1)) {
     throw new Error('Facebook media preview was not present in the final composer before posting. Leaving source files for retry.');
