@@ -851,8 +851,9 @@ async function clickFacebookExactPostButtonInDialog(page, dialogIndex, dialogSel
       const s = window.getComputedStyle(el);
       return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
     };
-    const dialogs = Array.from(document.querySelectorAll(selector)).filter(visible);
-    const dialog = index >= 0 ? Array.from(document.querySelectorAll(selector))[index] : dialogs[dialogs.length - 1];
+    const allDialogs = Array.from(document.querySelectorAll(selector));
+    const dialogs = allDialogs.filter(visible);
+    const dialog = index >= 0 ? allDialogs[index] : dialogs[dialogs.length - 1];
     if (!dialog || !visible(dialog)) return null;
     const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
     const candidates = buttons.map((el) => {
