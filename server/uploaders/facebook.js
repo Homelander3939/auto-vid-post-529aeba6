@@ -462,7 +462,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
     for (const dialog of dialogs) {
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
-      const normalizedDialogText = normalizePostText(dialogText);
+      const normalizedDialogText = normalize(dialogText);
       const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
       if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) continue;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
