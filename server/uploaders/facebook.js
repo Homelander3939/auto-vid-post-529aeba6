@@ -836,13 +836,46 @@ async function clickFacebookVerifiedPostButton(page, dialogSel, expectedText, ex
     console.error('[Facebook] Disabled verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
     throw new Error('Facebook Post button stayed disabled. Leaving source files for retry.');
   }
-  await postBtn.scrollIntoViewIfNeeded().catch(() => {});
-  let clicked = await postBtn.click({ timeout: 10000 }).then(() => true).catch(() => false);
-  if (!clicked) clicked = await postBtn.click({ force: true, timeout: 10000 }).then(() => true).catch(() => false);
+  const clicked = await clickFacebookExactPostButtonInDialog(page, readyIndex, dialogSel);
   if (!clicked) {
     console.error('[Facebook] Click verified Post diagnostics:', JSON.stringify(await getFacebookDiagnostics(page, dialogSel)));
     throw new Error('Could not click the verified Facebook Post button. Leaving source files for retry.');
   }
+}
+
+async function clickFacebookExactPostButtonInDialog(page, dialogIndex, dialogSel) {
+  const target = await page.evaluate(({ index, selector }) => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const dialogs = Array.from(document.querySelectorAll(selector)).filter(visible);
+    const dialog = index >= 0 ? Array.from(document.querySelectorAll(selector))[index] : dialogs[dialogs.length - 1];
+    if (!dialog || !visible(dialog)) return null;
+    const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+    const candidates = buttons.map((el) => {
+      if (!visible(el) || el.getAttribute('aria-disabled') === 'true' || el.disabled) return null;
+      const label = (el.getAttribute('aria-label') || '').trim();
+      const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+      const rect = el.getBoundingClientRect();
+      const parentText = (el.parentElement?.innerText || '').trim().replace(/\s+/g, ' ');
+      if (/postpone|boost post|scheduling options|post audience|share to groups/i.test(`${label} ${text} ${parentText}`)) return null;
+      if (!/^(post|publish|share)$/i.test(label || text)) return null;
+      let score = 100;
+      if (rect.width > 180 && rect.height >= 28) score += 35;
+      if (rect.top > window.innerHeight * 0.55) score += 25;
+      if (/post settings|post preview/i.test(dialog.innerText || dialog.textContent || '')) score += 20;
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, score };
+    }).filter(Boolean).sort((a, b) => b.score - a.score);
+    return candidates[0] || null;
+  }, { index: dialogIndex, selector: dialogSel }).catch(() => null);
+  if (!target) return false;
+  await page.mouse.move(target.x, target.y).catch(() => {});
+  await page.mouse.click(target.x, target.y, { delay: 120 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  return true;
 }
 
 async function verifyFacebookComposerHasText(page, dialogSel, expectedText) {
