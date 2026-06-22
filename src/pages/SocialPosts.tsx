@@ -675,10 +675,12 @@ export default function SocialPostsPage() {
   const [searchParams] = useSearchParams();
   // When arriving via "View draft" link (?post=<id>), jump straight to the Queue tab
   // where the draft is highlighted and the one-click "Post Now" button is visible.
-  const initialTab = searchParams.get('post') ? 'queue' : 'compose';
+  const initialTab = searchParams.get('tab') || (searchParams.get('post') ? 'queue' : 'compose');
   const [tab, setTab] = useState(initialTab);
   useEffect(() => {
-    if (searchParams.get('post')) setTab('queue');
+    const t = searchParams.get('tab');
+    if (t) setTab(t);
+    else if (searchParams.get('post')) setTab('queue');
   }, [searchParams]);
 
   const refresh = () => {
