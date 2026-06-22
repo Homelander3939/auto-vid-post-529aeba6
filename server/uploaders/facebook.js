@@ -462,6 +462,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
     const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
     for (const dialog of dialogs) {
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
+      const normalizedDialogText = normalizePostText(dialogText);
       const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
       if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) continue;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
@@ -469,6 +470,7 @@ async function facebookTextExistsInComposer(page, expectedText) {
         const body = (btn.innerText || btn.textContent || '').trim();
         return visible(btn) && /^(post|publish|share)$/i.test(label || body);
       });
+      if (normalizedDialogText.includes(needle) && hasPost) return true;
       for (const textbox of Array.from(dialog.querySelectorAll('div[role="textbox"][contenteditable="true"]')).filter(visible)) {
         const text = normalize(textbox.innerText || textbox.textContent || '');
         if (text.includes(needle) && (hasPost || textbox.getBoundingClientRect().width > 200)) return true;
