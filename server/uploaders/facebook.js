@@ -590,6 +590,7 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
       if (!visible(dialog)) return;
       const dialogText = (dialog.innerText || dialog.textContent || '').trim();
       const looksLikeComposer = /create post|what.*mind|write something|say something|post text|add to your post/i.test(dialogText);
+      const looksLikePostSettings = /post settings|post preview/i.test(dialogText);
       if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|make cover photo|update cover photo/i.test(dialogText) && !looksLikeComposer) return;
       const hasPost = Array.from(dialog.querySelectorAll('[role="button"], button')).some((btn) => {
         const label = (btn.getAttribute('aria-label') || '').trim();
@@ -607,7 +608,8 @@ async function getFacebookReadyComposerIndex(page, expectedText, expectedMediaCo
         if (/profile|avatar|emoji|sticker|icon/i.test(alt) && r.width < 180 && r.height < 180) return false;
         return r.width > 80 && r.height > 60;
       }).length;
-      if (mediaCount > 0 && previews < 1) return;
+      const hasPostSettingsPreview = looksLikePostSettings && /post preview/i.test(dialogText);
+      if (mediaCount > 0 && previews < 1 && !hasPostSettingsPreview) return;
       const z = Number.parseInt(window.getComputedStyle(dialog).zIndex || '0', 10);
       candidates.push({ index, previews, z: Number.isFinite(z) ? z : 0 });
     });
