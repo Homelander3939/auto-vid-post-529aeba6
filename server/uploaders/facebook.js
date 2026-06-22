@@ -1159,7 +1159,6 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   const count = Math.min(await articles.count().catch(() => 0), 5);
   const wanted = normalizePostText(snippet).slice(0, 45);
   for (let i = 0; i < count; i++) {
-  for (let i = 0; i < count; i++) {
     const article = articles.nth(i);
     const body = normalizePostText(await article.innerText({ timeout: 3000 }).catch(() => ''));
     if (wanted && i > 0 && !body.includes(wanted.slice(0, Math.min(28, wanted.length))) && !/just now|\b1m\b|\b2m\b/i.test(body)) continue;
@@ -1182,7 +1181,6 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
       await page.waitForTimeout(500);
     }
 
-    const menu = article.locator('[aria-label*="Actions for this post" i], [aria-label="More"][role="button"], [aria-label*="More options" i][role="button"], [aria-label*="Open Menu" i][role="button"], div[aria-haspopup="menu"][role="button"]').last();
     const menu = article.locator('[aria-label*="Actions for this post" i], [aria-label="More"][role="button"], [aria-label*="More options" i][role="button"], [aria-label*="Open Menu" i][role="button"], div[aria-haspopup="menu"][role="button"]').last();
     if (!(await menu.isVisible().catch(() => false))) {
       const href = await article.locator('a[href*="story_fbid="], a[href*="/posts/"], a[href*="/permalink/"], a[href*="/groups/"][href*="/posts/"], a[href*="/share/"]').first().getAttribute('href').catch(() => null);
