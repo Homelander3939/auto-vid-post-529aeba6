@@ -8,9 +8,10 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { Sparkles, Search, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Cpu, Globe, FileText, Hash, Loader2, CheckCircle2, AlertTriangle, X as XIcon, Trash2 } from 'lucide-react';
+import { Sparkles, Search, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Cpu, Globe, FileText, Hash, Loader2, CheckCircle2, AlertTriangle, X as XIcon, Trash2, CalendarClock, Play } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { useState } from 'react';
-import { listSocialPosts, getSocialImageUrl, listGenerationJobs, cancelGenerationJob, cancelAllRunningJobs, deleteGenerationJob, deletePendingCommand, deleteSocialPost, listAgentRuns, cancelAgentRun, deleteAgentRun, type SocialPost, type GenerationJob, type AgentRun } from '@/lib/socialPosts';
+import { listSocialPosts, getSocialImageUrl, listGenerationJobs, cancelGenerationJob, cancelAllRunningJobs, deleteGenerationJob, deletePendingCommand, deleteSocialPost, listAgentRuns, cancelAgentRun, deleteAgentRun, listGenerationSchedules, saveGenerationSchedule, deleteGenerationSchedule, runGenerationScheduleNow, type SocialPost, type GenerationJob, type AgentRun, type GenerationSchedule } from '@/lib/socialPosts';
 import { useToast } from '@/hooks/use-toast';
 import { Link } from 'react-router-dom';
 
