@@ -855,6 +855,48 @@ async function waitForFacebookComposerToFinish(page, dialogSel, timeout = 420000
   throw new Error(`Facebook did not confirm the post after waiting ${Math.round(timeout / 60000)} minutes${lastState?.text ? `: ${lastState.text.slice(0, 220)}` : ''}. Leaving source files for retry.`);
 }
 
+async function dismissFacebookPostPublishPrompts(page, timeout = 45000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const dismissed = await page.evaluate(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+      for (let i = dialogs.length - 1; i >= 0; i--) {
+        const dialog = dialogs[i];
+        const text = (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(text)) continue;
+        const buttons = Array.from(dialog.querySelectorAll('[role="button"], button, a'));
+        const target = buttons.find((el) => visible(el) && /^(not now|skip|done|close|×|x)$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()))
+          || buttons.find((el) => visible(el) && /close/i.test(el.getAttribute('aria-label') || ''));
+        if (target) {
+          target.click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+    if (!dismissed) {
+      const blockingPrompt = await page.evaluate(() => {
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return r.width > 8 && r.height > 8 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+        };
+        return Array.from(document.querySelectorAll('div[role="dialog"]')).some((dialog) => visible(dialog)
+          && /whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(dialog.innerText || dialog.textContent || ''));
+      }).catch(() => false);
+      if (!blockingPrompt) return;
+    }
+    await page.waitForTimeout(1200);
+  }
+}
+
 async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText = '', timeout = 420000) {
   const deadline = Date.now() + timeout;
   const expected = normalizePostText(expectedText).slice(0, 70);
