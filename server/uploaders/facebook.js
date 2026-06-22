@@ -1656,7 +1656,7 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     // Give Facebook time to propagate the new post to the profile feed before
     // we go looking for its permalink.
     await page.waitForTimeout(8000);
-    await dismissOverlayBlockingFlow(page, { logPrefix: "[Facebook Post-Submit]" }).catch(() => {});
+    await dismissFacebookPostPublishPrompts(page).catch(() => {});
     const baselineSet = new Set(baselinePermalinks);
     const normalizedResponsePermalink = normalizeFacebookPermalink(publishedUrl) || normalizeFacebookPermalink(responsePermalink);
     const finalUrl = (normalizedResponsePermalink && !baselineSet.has(normalizedResponsePermalink) ? normalizedResponsePermalink : null)
