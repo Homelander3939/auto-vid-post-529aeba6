@@ -716,10 +716,17 @@ export default function AITasksPanel() {
     }
   };
 
-  if (total === 0) return null;
+  if (total === 0) {
+    return (
+      <div className="space-y-3">
+        <SchedulesSection />
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <SchedulesSection />
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
           <Sparkles className="w-4 h-4 text-primary" /> AI Agent Tasks ({total})
