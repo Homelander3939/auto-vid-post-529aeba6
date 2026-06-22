@@ -924,12 +924,13 @@ async function waitForFacebookPublishConfirmation(page, dialogSel, expectedText 
         return visible(btn) && btn.getAttribute('aria-disabled') !== 'true' && !/postpone/i.test(`${label} ${body}`) && /^(post|publish|share)$/i.test(label || body);
       });
       const seePostVisible = Array.from(root.querySelectorAll('a, [role="button"], button')).some((el) => visible(el) && /^(see|view) post$/i.test((el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()));
-      return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
+      const postPublishPrompt = /whatsapp|make it easier to contact you|boost post|add .* button|invite friends|turn on notifications/i.test(text) && !postButtonVisible;
+      return { dialogVisible: visible(dialog), busy, postButtonVisible, seePostVisible, postPublishPrompt, hasExpectedText: needle ? normalize(text).includes(needle) : true, text };
     }, { selector: dialogSel, dialogIndex: activeIndex, needle: expected }).catch(() => ({ dialogVisible: false, busy: false, postButtonVisible: false, seePostVisible: false, hasExpectedText: true, text: '' }));
     if (/couldn.?t post|could not post|failed to post|try again|something went wrong/i.test(state.text || '')) {
       return { confirmed: false, error: state.text.slice(0, 300) };
     }
-    if (!state.dialogVisible || state.seePostVisible || (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || ''))) {
+    if (!state.dialogVisible || state.seePostVisible || state.postPublishPrompt || (!state.busy && !state.postButtonVisible && /posted|shared|published|view post|see post/i.test(state.text || ''))) {
       return { confirmed: true, url: null };
     }
     if (state.postButtonVisible && state.hasExpectedText && !state.busy) {
