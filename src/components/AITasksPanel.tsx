@@ -8,9 +8,10 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { Sparkles, Search, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Cpu, Globe, FileText, Hash, Loader2, CheckCircle2, AlertTriangle, X as XIcon, Trash2 } from 'lucide-react';
+import { Sparkles, Search, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Cpu, Globe, FileText, Hash, Loader2, CheckCircle2, AlertTriangle, X as XIcon, Trash2, CalendarClock, Play } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { useState } from 'react';
-import { listSocialPosts, getSocialImageUrl, listGenerationJobs, cancelGenerationJob, cancelAllRunningJobs, deleteGenerationJob, deletePendingCommand, deleteSocialPost, listAgentRuns, cancelAgentRun, deleteAgentRun, type SocialPost, type GenerationJob, type AgentRun } from '@/lib/socialPosts';
+import { listSocialPosts, getSocialImageUrl, listGenerationJobs, cancelGenerationJob, cancelAllRunningJobs, deleteGenerationJob, deletePendingCommand, deleteSocialPost, listAgentRuns, cancelAgentRun, deleteAgentRun, listGenerationSchedules, saveGenerationSchedule, deleteGenerationSchedule, runGenerationScheduleNow, type SocialPost, type GenerationJob, type AgentRun, type GenerationSchedule } from '@/lib/socialPosts';
 import { useToast } from '@/hooks/use-toast';
 import { Link } from 'react-router-dom';
 
@@ -523,6 +524,100 @@ function AgentRunRow({ run, onCancel, onDelete }: { run: AgentRun; onCancel: (id
   );
 }
 
+function humanCron(cron: string): string {
+  const p = (cron || '').trim().split(/\s+/);
+  if (p.length !== 5) return cron || '';
+  const [min, hr, , , dow] = p;
+  const mm = String(parseInt(min) || 0).padStart(2, '0');
+  if (hr === '*' || hr.startsWith('*/')) {
+    const n = hr === '*' ? 1 : parseInt(hr.replace('*/', '')) || 1;
+    return n === 1 ? `Every hour at :${mm}` : `Every ${n}h at :${mm}`;
+  }
+  const hh = String(parseInt(hr) || 0).padStart(2, '0');
+  if (dow && dow !== '*') {
+    const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const days = dow.split(',').map((d) => names[parseInt(d)] || d).join(', ');
+    return `${days} at ${hh}:${mm}`;
+  }
+  return `Daily at ${hh}:${mm}`;
+}
+
+function SchedulesSection() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const { data: schedules = [] } = useQuery({
+    queryKey: ['generation_schedules'], queryFn: listGenerationSchedules, refetchInterval: 15000,
+  });
+  if (schedules.length === 0) return null;
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['generation_schedules'] });
+
+  const handleToggle = async (s: GenerationSchedule, enabled: boolean) => {
+    try { await saveGenerationSchedule({ ...s, enabled }); refresh();
+      toast({ title: enabled ? 'Schedule resumed' : 'Schedule paused' });
+    } catch (e: any) { toast({ title: 'Toggle failed', description: e.message, variant: 'destructive' }); }
+  };
+  const handleDelete = async (id: number) => {
+    try { await deleteGenerationSchedule(id); refresh(); toast({ title: 'Schedule deleted' }); }
+    catch (e: any) { toast({ title: 'Delete failed', description: e.message, variant: 'destructive' }); }
+  };
+  const handleRunNow = async (id: number) => {
+    try { await runGenerationScheduleNow(id); toast({ title: 'Triggered', description: 'Running now…' }); }
+    catch (e: any) { toast({ title: 'Trigger failed', description: e.message, variant: 'destructive' }); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+          <CalendarClock className="w-4 h-4 text-primary" /> Recurring AI Post Schedules ({schedules.length})
+        </h2>
+        <Link to="/social?tab=schedules">
+          <Button variant="ghost" size="sm" className="h-7 text-xs gap-1">
+            Manage <ExternalLink className="w-3 h-3" />
+          </Button>
+        </Link>
+      </div>
+      <div className="space-y-2">
+        {schedules.map((s) => (
+          <Card key={s.id} className="border bg-card/60">
+            <CardContent className="p-3">
+              <div className="flex items-start gap-3">
+                <div className={`w-2.5 h-2.5 rounded-full shrink-0 mt-1.5 ${s.enabled ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground/30'}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <span className="text-xs font-medium truncate">{s.name || 'Untitled'}</span>
+                    <Badge variant="outline" className="text-[10px] h-5">{humanCron(s.cron_expression)}</Badge>
+                    {(s.target_platforms || []).map((p) => (
+                      <Badge key={p} variant="secondary" className="text-[10px] h-5 capitalize">{p}</Badge>
+                    ))}
+                    {s.auto_publish && <Badge className="text-[10px] h-5 bg-primary/15 text-primary border-primary/30">auto-publish</Badge>}
+                  </div>
+                  {s.ai_prompt && (
+                    <p className="text-[11px] text-muted-foreground italic line-clamp-1">"{s.ai_prompt}"</p>
+                  )}
+                  {s.last_run_at && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5">Last ran {new Date(s.last_run_at).toLocaleString()}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <Switch checked={s.enabled} onCheckedChange={(v) => handleToggle(s, v)} />
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground" title="Run now" onClick={() => handleRunNow(s.id)}>
+                    <Play className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" title="Delete schedule" onClick={() => handleDelete(s.id)}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function AITasksPanel() {
   const [showAll, setShowAll] = useState(false);
   const [cancellingAll, setCancellingAll] = useState(false);
@@ -621,10 +716,17 @@ export default function AITasksPanel() {
     }
   };
 
-  if (total === 0) return null;
+  if (total === 0) {
+    return (
+      <div className="space-y-3">
+        <SchedulesSection />
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <SchedulesSection />
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
           <Sparkles className="w-4 h-4 text-primary" /> AI Agent Tasks ({total})
