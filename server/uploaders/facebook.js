@@ -1214,6 +1214,35 @@ async function copyFacebookLinkFromTopArticle(page, snippet = '') {
   return null;
 }
 
+async function copyFacebookLinkViaShareDialog(page, snippet = '') {
+  const wanted = normalizePostText(snippet).slice(0, 45);
+  const articles = page.locator('[role="article"]');
+  const count = Math.min(await articles.count().catch(() => 0), 8);
+  for (let i = 0; i < count; i++) {
+    const article = articles.nth(i);
+    const body = normalizePostText(await article.innerText({ timeout: 3000 }).catch(() => ''));
+    if (wanted && i > 0 && !body.includes(wanted.slice(0, Math.min(28, wanted.length))) && !/just now|now|\b\d+\s*(m|min|mins|minute|minutes)\b/i.test(body)) continue;
+
+    const share = article.locator('[aria-label="Share"][role="button"], div[role="button"]:has-text("Share"), span:has-text("Share")').last();
+    if (!(await share.isVisible().catch(() => false))) continue;
+    await share.scrollIntoViewIfNeeded().catch(() => {});
+    await share.click({ force: true, timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+
+    const copy = page.locator('div[role="dialog"] [role="button"]:has-text("Copy link"), div[role="dialog"] span:has-text("Copy link"), [role="menuitem"]:has-text("Copy link")').last();
+    if (await copy.isVisible().catch(() => false)) {
+      await copy.click({ force: true, timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+      const clipped = await page.evaluate(() => navigator.clipboard?.readText?.()).catch(() => null);
+      const normalized = normalizeFacebookPermalink(clipped) || extractFacebookPermalinkFromText(clipped);
+      if (normalized) return normalized;
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
 function toBasicFacebookUrl(targetUrl = null) {
   try {
     const source = targetUrl && /^https?:\/\//i.test(targetUrl) ? targetUrl : 'https://www.facebook.com/';
