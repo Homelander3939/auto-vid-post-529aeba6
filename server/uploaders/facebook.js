@@ -1594,18 +1594,9 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
       : (description || '');
 
-    // Prefer Facebook's lightweight/basic composer first. It is server-rendered,
-    // uses stable textarea/file-input/form controls, and avoids the modern SPA's
-    // nested popups where text/media can land in different dialogs.
-    // Force modern flow: skipping basic composer fallback as requested
-    const basicUrl = null; /* await tryUploadToFacebookBasic(page, targetUrl, fullText, imageFiles, baselinePermalinks) */
-      console.warn('[Facebook] Basic composer fallback unavailable:', e.message);
-      return null;
-    });
-    if (basicUrl) {
-      await verifyPostedFacebookUrlContainsText(page, basicUrl, fullText);
-      return { url: basicUrl };
-    }
+    // Follow the verified Page UI flow from the screenshots exactly:
+    // composer → text/photo → Next → Post → dismiss prompts → Share → Copy link.
+    // Do not use basic/mobile fallbacks here; they can land on unrelated cover/photo surfaces.
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(1500);
