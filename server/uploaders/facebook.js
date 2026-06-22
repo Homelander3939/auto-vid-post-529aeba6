@@ -181,11 +181,92 @@ async function closeFacebookNonComposerDialogs(page) {
   return closed;
 }
 
+async function clickFacebookMarkedComposerBox(page) {
+  const target = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 40 && r.height > 20 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const textOf = (el) => {
+      if (!el) return '';
+      const childLabels = Array.from(el.querySelectorAll?.('[aria-label], [aria-placeholder], [placeholder]') || [])
+        .slice(0, 8)
+        .map((child) => `${child.getAttribute('aria-label') || ''} ${child.getAttribute('aria-placeholder') || ''} ${child.getAttribute('placeholder') || ''}`)
+        .join(' ');
+      return `${el.innerText || ''} ${el.textContent || ''} ${el.getAttribute?.('aria-label') || ''} ${el.getAttribute?.('aria-placeholder') || ''} ${el.getAttribute?.('placeholder') || ''} ${el.getAttribute?.('title') || ''} ${childLabels}`;
+    };
+    const main = document.querySelector('[role="main"], main') || document.body;
+    const nodes = Array.from(main.querySelectorAll('[role="button"], button, a[href], [tabindex="0"], [aria-label], [aria-placeholder]'));
+    const candidates = nodes.map((el) => {
+      if (!visible(el)) return null;
+      const clickable = el.closest('[role="button"], button, a[href], [tabindex="0"]') || el;
+      if (!visible(clickable)) return null;
+      const r = clickable.getBoundingClientRect();
+      const local = textOf(el);
+      const clickableText = textOf(clickable);
+      const parentText = textOf(clickable.parentElement);
+      const cardText = textOf(clickable.closest('form, section, [role="region"], [aria-label], div'));
+      const haystack = `${local} ${clickableText} ${parentText} ${cardText}`.replace(/\s+/g, ' ').trim();
+      let score = 0;
+      if (/what.?s on your mind|what.*mind|write something|say something/i.test(haystack)) score += 240;
+      if (/create post|composer|status update|post text/i.test(haystack)) score += 70;
+      if (/photo\/video|live video|add to your post/i.test(parentText) && /what.*mind|write something|say something/i.test(haystack)) score += 25;
+      if (r.width >= 240 && r.height >= 28) score += 25;
+      if (r.top >= 70 && r.top <= Math.min(window.innerHeight * 0.55, 430)) score += 30;
+      if (r.left >= 220 && r.right <= window.innerWidth - 120) score += 25;
+      if (/cover photo|profile picture|avatar|photo viewer|view photo|edit photo details|professional dashboard|ads manager|search facebook|comment|reply|message/i.test(haystack)
+        && !/what.?s on your mind|what.*mind|write something|say something/i.test(haystack)) score -= 260;
+      if (/stories|reels|recommended post|boost post|see insights/i.test(haystack)
+        && !/what.?s on your mind|what.*mind|write something|say something/i.test(haystack)) score -= 120;
+      return { el: clickable, score, top: r.top, area: r.width * r.height };
+    }).filter((item) => item && item.score > 120);
+    candidates.sort((a, b) => (b.score - a.score) || (a.top - b.top) || (b.area - a.area));
+    const picked = candidates[0]?.el;
+    if (!picked) return null;
+    const r = picked.getBoundingClientRect();
+    return { x: r.left + Math.min(Math.max(r.width * 0.45, 40), r.width - 10), y: r.top + r.height / 2 };
+  }).catch(() => null);
+  if (!target) return false;
+  await page.mouse.move(target.x, target.y).catch(() => {});
+  await page.mouse.click(target.x, target.y, { delay: 80 }).catch(() => {});
+  await page.waitForTimeout(1800);
+  return await facebookComposerOpen(page);
+}
+
+async function getFacebookComposerEntryDiagnostics(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 20 && r.height > 12 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    };
+    const main = document.querySelector('[role="main"], main') || document.body;
+    const buttons = Array.from(main.querySelectorAll('[role="button"], button, a[href], [aria-label], [aria-placeholder]'))
+      .filter(visible)
+      .map((el) => ({
+        text: (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 90),
+        label: `${el.getAttribute('aria-label') || ''} ${el.getAttribute('aria-placeholder') || ''} ${el.getAttribute('placeholder') || ''}`.trim().slice(0, 90),
+      }))
+      .filter((item) => /mind|post|photo|video|story|reel|create/i.test(`${item.text} ${item.label}`))
+      .slice(0, 20);
+    return { url: location.href, title: document.title, buttons, body: (main.innerText || main.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 500) };
+  }).catch((e) => ({ error: e.message, url: page.url() }));
+}
+
 async function clickFacebookModernComposerEntry(page, needsMedia = false) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (await facebookComposerOpen(page)) return true;
+    await closeFacebookNonComposerDialogs(page);
+    if (await clickFacebookMarkedComposerBox(page)) return true;
+    await page.waitForTimeout(1200);
+  }
   const locators = [
-    page.locator('main [role="button"]:has-text("on your mind"), main [aria-label*="What" i]:has-text("mind")').first(),
-    page.locator('main [role="button"]:has-text("Create post"), main [aria-label*="Create post" i], a[href*="/composer/"]').first(),
-    page.locator('main [role="button"]:has-text("Write something"), main [aria-label*="Write something" i], main [role="button"]:has-text("Say something")').first(),
+    page.locator('[role="main"] [role="button"]:has-text("on your mind"), main [role="button"]:has-text("on your mind"), [role="main"] [aria-label*="What" i], main [aria-label*="What" i]').first(),
+    page.locator('[role="main"] [role="button"]:has-text("Create post"), main [role="button"]:has-text("Create post"), [role="main"] [aria-label*="Create post" i], main [aria-label*="Create post" i], a[href*="/composer/"]').first(),
+    page.locator('[role="main"] [role="button"]:has-text("Write something"), main [role="button"]:has-text("Write something"), [role="main"] [aria-label*="Write something" i], main [aria-label*="Write something" i], [role="main"] [role="button"]:has-text("Say something"), main [role="button"]:has-text("Say something")').first(),
   ];
   for (const entry of locators) {
     if (!(await entry.isVisible().catch(() => false))) continue;
