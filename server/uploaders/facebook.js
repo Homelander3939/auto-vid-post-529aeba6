@@ -112,19 +112,89 @@ async function closeFacebookNonComposerDialogs(page) {
 }
 
 async function clickFacebookModernComposerEntry(page) {
-  const locators = [
-    page.locator('[role="main"] [role="button"]:has-text("on your mind"), [aria-label*="What" i]').first(),
-    page.locator('[role="main"] [role="button"]:has-text("Create post"), [aria-label*="Create post" i]').first(),
-    page.locator('[role="main"] [role="button"]:has-text("Write something")').first(),
-  ];
-  for (const entry of locators) {
-    if (await entry.isVisible().catch(() => false)) {
-      await entry.scrollIntoViewIfNeeded().catch(() => {});
-      await entry.click({ force: true, timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(1500);
+  const phrases = ['on your mind', 'write something', 'create post', 'create a post', 'start a post', 'say something'];
+
+  // Strategy A: DOM scan — find any visible element whose text or aria-label matches,
+  // walk up to nearest clickable ancestor, click via JS to bypass overlay issues.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const clicked = await page.evaluate((phrases) => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 20 && r.height > 12 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+      };
+      const matches = (txt) => {
+        const t = (txt || '').toLowerCase();
+        if (!t) return false;
+        if (/comment|search|message|reply|caption|story|reel/i.test(t)) return false;
+        return phrases.some((p) => t.includes(p));
+      };
+      const all = Array.from(document.querySelectorAll('div, span, a, button, [role="button"], [aria-label]'));
+      const candidates = [];
+      for (const el of all) {
+        if (!isVisible(el)) continue;
+        const aria = el.getAttribute('aria-label') || '';
+        const txt = el.innerText || '';
+        if (!matches(aria) && !matches(txt)) continue;
+        // prefer small leaf-ish elements (avoid huge containers)
+        if ((el.innerText || '').length > 120) continue;
+        candidates.push(el);
+      }
+      // sort by vertical position so we hit the page's own composer prompt (top of feed)
+      candidates.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      for (const el of candidates) {
+        // walk up to nearest clickable ancestor
+        let target = el;
+        for (let i = 0; i < 6 && target; i++) {
+          const role = target.getAttribute && target.getAttribute('role');
+          if (role === 'button' || target.tagName === 'BUTTON' || target.tagName === 'A' || target.onclick) break;
+          if (target.parentElement) target = target.parentElement; else break;
+        }
+        try {
+          target.scrollIntoView({ block: 'center' });
+          const r = target.getBoundingClientRect();
+          // dispatch real mouse events at element center
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height / 2;
+          for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
+          }
+          return true;
+        } catch (e) { /* try next */ }
+      }
+      return false;
+    }, phrases).catch(() => false);
+
+    if (clicked) {
+      await page.waitForTimeout(2000);
       if (await facebookComposerOpen(page)) return true;
     }
+
+    // Strategy B: Playwright getByText fallback with real mouse click at coordinates
+    for (const phrase of phrases) {
+      const loc = page.getByText(new RegExp(phrase, 'i')).first();
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.scrollIntoViewIfNeeded().catch(() => {});
+        const box = await loc.boundingBox().catch(() => null);
+        if (box) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 80 }).catch(() => {});
+          await page.waitForTimeout(2000);
+          if (await facebookComposerOpen(page)) return true;
+        }
+      }
+    }
+
+    // Strategy C: keyboard shortcut "p" opens Create Post on facebook.com pages
+    await page.keyboard.press('p').catch(() => {});
+    await page.waitForTimeout(1500);
+    if (await facebookComposerOpen(page)) return true;
+
+    await closeFacebookNonComposerDialogs(page);
+    await page.waitForTimeout(800);
   }
+
   return false;
 }
 
