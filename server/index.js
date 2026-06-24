@@ -2559,7 +2559,6 @@ async function processRecurringSchedule(opts = {}) {
                 await supabase.from('upload_jobs').update({
                   status: 'failed',
                   completed_at: new Date().toISOString(),
-                  error_message: String(procErr?.message || procErr).slice(0, 500),
                 }).eq('id', job.id);
               } catch {}
               await notifyTelegram(settings, `❌ Schedule "${config.name}" failed on ${pair.videoFile}: ${String(procErr?.message || procErr).slice(0, 200)}`);
