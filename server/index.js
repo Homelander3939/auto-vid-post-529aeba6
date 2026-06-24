@@ -2551,7 +2551,19 @@ async function processRecurringSchedule(opts = {}) {
 
             try { saveJobAccountSelections(job.id, accountSelections); } catch {}
             console.log(`[Recurring] Created immediate job ${job.id} for ${pair.videoFile}`);
-            await processJob(job.id, { folderPath });
+            try {
+              await processJob(job.id, { folderPath });
+            } catch (procErr) {
+              console.error(`[Recurring] processJob threw for ${pair.videoFile}:`, procErr);
+              try {
+                await supabase.from('upload_jobs').update({
+                  status: 'failed',
+                  completed_at: new Date().toISOString(),
+                  error_message: String(procErr?.message || procErr).slice(0, 500),
+                }).eq('id', job.id);
+              } catch {}
+              await notifyTelegram(settings, `❌ Schedule "${config.name}" failed on ${pair.videoFile}: ${String(procErr?.message || procErr).slice(0, 200)}`);
+            }
           } else {
             // Subsequent videos: create scheduled uploads with spacing
             const scheduledAt = new Date(now.getTime() + i * intervalMinutes * 60_000).toISOString();
