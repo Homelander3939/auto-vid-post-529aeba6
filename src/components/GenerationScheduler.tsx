@@ -112,12 +112,21 @@ function ScheduleCard({
   const [minute, setMinute] = useState(parsed.minute);
   const [weekdays, setWeekdays] = useState<number[]>(parsed.weekdays);
   const [interval, setInterval] = useState(parsed.interval);
+  const [intervalMinutes, setIntervalMinutes] = useState(parsed.intervalMinutes);
+
+  // Source + batching (parity with video-upload scheduler)
+  const [sourceType, setSourceType] = useState<'ai' | 'folder'>(schedule.source_type === 'folder' ? 'folder' : 'ai');
+  const [folderPath, setFolderPath] = useState(schedule.folder_path || '');
+  const [postsPerRun, setPostsPerRun] = useState(Math.max(1, Math.min(20, Number(schedule.posts_per_run) || 1)));
 
   const [useDuration, setUseDuration] = useState(!!schedule.end_at);
   const [durationAmount, setDurationAmount] = useState(7);
   const [durationUnit, setDurationUnit] = useState<DurationUnit>('days');
 
-  const cron = useMemo(() => stateToCron(mode, hour, minute, weekdays, interval), [mode, hour, minute, weekdays, interval]);
+  const cron = useMemo(
+    () => stateToCron(mode, hour, minute, weekdays, interval, intervalMinutes),
+    [mode, hour, minute, weekdays, interval, intervalMinutes],
+  );
   const summary = humanReadable(cron);
 
   useEffect(() => {
@@ -149,9 +158,13 @@ function ScheduleCard({
       include_image: includeImage,
       account_selections: accountSel,
       end_at: endAt,
-      auto_publish: autoPublish,
-      topic_mode: topicMode,
+      // Folder mode forces auto-publish (no AI draft step).
+      auto_publish: sourceType === 'folder' ? true : autoPublish,
+      topic_mode: sourceType === 'folder' ? false : topicMode,
       variation_hints: variationHints,
+      source_type: sourceType,
+      folder_path: folderPath.trim(),
+      posts_per_run: postsPerRun,
     });
   };
 
