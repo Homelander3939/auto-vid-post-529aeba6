@@ -532,6 +532,9 @@ export default function GenerationScheduler() {
     auto_publish: false,
     topic_mode: true,
     variation_hints: [],
+    source_type: 'ai',
+    folder_path: '',
+    posts_per_run: 1,
   }]);
 
   return (
