@@ -70,6 +70,13 @@ Deno.serve(async (req) => {
 
   for (const s of (schedules || [])) {
     if (forceId && s.id !== forceId) continue;
+    // Folder-source schedules are owned by the local worker (it reads .txt + images
+    // from disk and publishes via the same pipeline as "Publish now"). Skip here so
+    // we don't double-fire.
+    if ((s as any).source_type === 'folder') {
+      skipped.push({ id: s.id, reason: 'folder-source-handled-by-local-worker' });
+      continue;
+    }
     if (s.end_at && new Date(s.end_at).getTime() < now.getTime()) {
       skipped.push({ id: s.id, reason: 'expired' });
       continue;
@@ -141,10 +148,83 @@ Deno.serve(async (req) => {
     // edge function only persists+returns the savedPostId via SSE) and parse
     // the stream for the `saved` event so we can flip the new draft to pending.
     const url = `${Deno.env.get('SUPABASE_URL')}/functions/v1/generate-social-post`;
+    const postsPerRun = Math.max(1, Math.min(20, Number((s as any).posts_per_run) || 1));
 
-    if (s.auto_publish) {
-      try {
-        const resp = await fetch(url, {
+    for (let i = 0; i < postsPerRun; i++) {
+      if (s.auto_publish) {
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+            },
+            body: JSON.stringify({
+              prompt: finalPrompt, platforms,
+              includeImage: s.include_image !== false, stream: true,
+            }),
+          });
+
+          let savedPostId: string | null = null;
+          if (resp.ok && resp.body) {
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let currentEvent = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buffer.indexOf('\n')) !== -1) {
+                let line = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 1);
+                if (line.endsWith('\r')) line = line.slice(0, -1);
+                if (!line) { currentEvent = ''; continue; }
+                if (line.startsWith('event: ')) { currentEvent = line.slice(7).trim(); continue; }
+                if (line.startsWith('data: ') && currentEvent === 'saved') {
+                  try {
+                    const parsed = JSON.parse(line.slice(6));
+                    if (parsed?.id) savedPostId = parsed.id;
+                  } catch { /* ignore */ }
+                }
+              }
+            }
+          }
+
+          if (savedPostId) {
+            const selections: Record<string, string> = { ...(s.account_selections || {}) };
+            const missing = platforms.filter((p) => !selections[p]);
+            if (missing.length) {
+              const { data: accts } = await supabase
+                .from('social_post_accounts')
+                .select('id, platform, is_default, enabled')
+                .in('platform', missing)
+                .eq('enabled', true);
+              for (const p of missing) {
+                const list = (accts || []).filter((a: any) => a.platform === p);
+                const def = list.find((a: any) => a.is_default) || list[0];
+                if (def) selections[p] = def.id;
+              }
+            }
+
+            const platformResults = platforms.map((name) => ({ name, status: 'pending' }));
+            await supabase.from('social_posts').update({
+              status: 'pending',
+              account_selections: selections,
+              platform_results: platformResults,
+            } as any).eq('id', savedPostId);
+
+            triggered.push({ id: s.id, name: s.name, platforms, savedPostId, mode: 'auto-publish', batchIndex: i });
+          } else {
+            triggered.push({ id: s.id, name: s.name, platforms, mode: 'auto-publish-no-save', batchIndex: i });
+          }
+        } catch (e: any) {
+          console.error('[run-due-generations] auto-publish failed', s.id, e?.message);
+          skipped.push({ id: s.id, reason: 'auto-publish-error', error: e?.message, batchIndex: i });
+        }
+      } else {
+        fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -154,86 +234,10 @@ Deno.serve(async (req) => {
             prompt: finalPrompt, platforms,
             includeImage: s.include_image !== false, stream: true,
           }),
-        });
+        }).catch((e) => console.error('[run-due-generations] invoke failed', s.id, e?.message));
 
-        let savedPostId: string | null = null;
-        if (resp.ok && resp.body) {
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          let currentEvent = '';
-          // Drain the SSE stream — it ends when generate-social-post is done
-          // (max ~2 min). We only need the `saved` event but must consume to EOF
-          // so the function fully runs (image gen, telegram, draft save).
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buffer.indexOf('\n')) !== -1) {
-              let line = buffer.slice(0, nl);
-              buffer = buffer.slice(nl + 1);
-              if (line.endsWith('\r')) line = line.slice(0, -1);
-              if (!line) { currentEvent = ''; continue; }
-              if (line.startsWith('event: ')) { currentEvent = line.slice(7).trim(); continue; }
-              if (line.startsWith('data: ') && currentEvent === 'saved') {
-                try {
-                  const parsed = JSON.parse(line.slice(6));
-                  if (parsed?.id) savedPostId = parsed.id;
-                } catch { /* ignore */ }
-              }
-            }
-          }
-        }
-
-        if (savedPostId) {
-          // Resolve account selections: prefer schedule's mapping, fallback to default account per platform.
-          const selections: Record<string, string> = { ...(s.account_selections || {}) };
-          const missing = platforms.filter((p) => !selections[p]);
-          if (missing.length) {
-            const { data: accts } = await supabase
-              .from('social_post_accounts')
-              .select('id, platform, is_default, enabled')
-              .in('platform', missing)
-              .eq('enabled', true);
-            for (const p of missing) {
-              const list = (accts || []).filter((a: any) => a.platform === p);
-              const def = list.find((a: any) => a.is_default) || list[0];
-              if (def) selections[p] = def.id;
-            }
-          }
-
-          const platformResults = platforms.map((name) => ({ name, status: 'pending' }));
-          await supabase.from('social_posts').update({
-            status: 'pending',
-            account_selections: selections,
-            platform_results: platformResults,
-          } as any).eq('id', savedPostId);
-
-          triggered.push({ id: s.id, name: s.name, platforms, savedPostId, mode: 'auto-publish' });
-        } else {
-          triggered.push({ id: s.id, name: s.name, platforms, mode: 'auto-publish-no-save' });
-        }
-      } catch (e: any) {
-        console.error('[run-due-generations] auto-publish failed', s.id, e?.message);
-        skipped.push({ id: s.id, reason: 'auto-publish-error', error: e?.message });
+        triggered.push({ id: s.id, name: s.name, platforms, mode: 'draft', batchIndex: i });
       }
-    } else {
-      // Fire and forget — draft preview goes to Telegram as before.
-      // Use stream:true since the edge function only supports streaming mode.
-      fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
-        },
-        body: JSON.stringify({
-          prompt: finalPrompt, platforms,
-          includeImage: s.include_image !== false, stream: true,
-        }),
-      }).catch((e) => console.error('[run-due-generations] invoke failed', s.id, e?.message));
-
-      triggered.push({ id: s.id, name: s.name, platforms, mode: 'draft' });
     }
   }
 

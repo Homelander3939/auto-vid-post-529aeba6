@@ -25,11 +25,12 @@ import {
   type GenerationSchedule, type SocialAccount,
 } from '@/lib/socialPosts';
 
-type FrequencyMode = 'hourly' | 'daily' | 'weekly';
+type FrequencyMode = 'interval' | 'hourly' | 'daily' | 'weekly';
 type DurationUnit = 'hours' | 'days' | 'weeks';
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const DAYS_OF_WEEK = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const PLATFORM_LABELS: Record<string, string> = { x: 'X', linkedin: 'LinkedIn', facebook: 'Facebook' };
+const INTERVAL_MINUTE_OPTIONS = [5, 10, 15, 20, 30, 45];
 
 function clampMinute(v: number) {
   if (Number.isNaN(v)) return 0;
@@ -38,23 +39,29 @@ function clampMinute(v: number) {
 
 function cronToState(cron: string) {
   const parts = (cron || '0 9 * * *').split(' ');
-  if (parts.length !== 5) return { mode: 'daily' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1 };
+  if (parts.length !== 5) return { mode: 'daily' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes: 10 };
   const [min, hr, , , dow] = parts;
+  // Interval mode: */N minutes
+  if (min.startsWith('*/') && hr === '*') {
+    const intervalMinutes = parseInt(min.replace('*/', ''), 10) || 10;
+    return { mode: 'interval' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes };
+  }
   const minute = min === '*' ? 0 : parseInt(min) || 0;
   const hour = hr === '*' ? 0 : parseInt(hr.replace('*/', '')) || 9;
   if (hr === '*' || hr.startsWith('*/')) {
     const interval = hr === '*' ? 1 : parseInt(hr.replace('*/', '')) || 1;
-    return { mode: 'hourly' as FrequencyMode, minute, hour: interval, weekdays: [1,2,3,4,5], interval };
+    return { mode: 'hourly' as FrequencyMode, minute, hour: interval, weekdays: [1,2,3,4,5], interval, intervalMinutes: 10 };
   }
   if (dow !== '*') {
     const weekdays = dow.split(',').map(Number).filter((n) => !isNaN(n));
-    return { mode: 'weekly' as FrequencyMode, minute, hour, weekdays, interval: 1 };
+    return { mode: 'weekly' as FrequencyMode, minute, hour, weekdays, interval: 1, intervalMinutes: 10 };
   }
-  return { mode: 'daily' as FrequencyMode, minute, hour, weekdays: [1,2,3,4,5], interval: 1 };
+  return { mode: 'daily' as FrequencyMode, minute, hour, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes: 10 };
 }
 
-function stateToCron(mode: FrequencyMode, hour: number, minute: number, weekdays: number[], interval: number) {
+function stateToCron(mode: FrequencyMode, hour: number, minute: number, weekdays: number[], interval: number, intervalMinutes: number) {
   switch (mode) {
+    case 'interval': return `*/${Math.max(1, intervalMinutes)} * * * *`;
     case 'hourly': return interval === 1 ? `${minute} * * * *` : `${minute} */${interval} * * *`;
     case 'daily':  return `${minute} ${hour} * * *`;
     case 'weekly': return `${minute} ${hour} * * ${weekdays.sort().join(',')}`;
@@ -65,6 +72,7 @@ function humanReadable(cron: string) {
   const s = cronToState(cron);
   const t = `${s.hour.toString().padStart(2, '0')}:${s.minute.toString().padStart(2, '0')}`;
   switch (s.mode) {
+    case 'interval': return `Every ${s.intervalMinutes} min`;
     case 'hourly': return s.interval === 1 ? `Every hour at :${s.minute.toString().padStart(2, '0')}` : `Every ${s.interval}h at :${s.minute.toString().padStart(2, '0')}`;
     case 'daily':  return `Daily at ${t}`;
     case 'weekly': return `${s.weekdays.sort().map((d) => DAYS_OF_WEEK[d]).join(', ')} at ${t}`;
@@ -104,12 +112,21 @@ function ScheduleCard({
   const [minute, setMinute] = useState(parsed.minute);
   const [weekdays, setWeekdays] = useState<number[]>(parsed.weekdays);
   const [interval, setInterval] = useState(parsed.interval);
+  const [intervalMinutes, setIntervalMinutes] = useState(parsed.intervalMinutes);
+
+  // Source + batching (parity with video-upload scheduler)
+  const [sourceType, setSourceType] = useState<'ai' | 'folder'>(schedule.source_type === 'folder' ? 'folder' : 'ai');
+  const [folderPath, setFolderPath] = useState(schedule.folder_path || '');
+  const [postsPerRun, setPostsPerRun] = useState(Math.max(1, Math.min(20, Number(schedule.posts_per_run) || 1)));
 
   const [useDuration, setUseDuration] = useState(!!schedule.end_at);
   const [durationAmount, setDurationAmount] = useState(7);
   const [durationUnit, setDurationUnit] = useState<DurationUnit>('days');
 
-  const cron = useMemo(() => stateToCron(mode, hour, minute, weekdays, interval), [mode, hour, minute, weekdays, interval]);
+  const cron = useMemo(
+    () => stateToCron(mode, hour, minute, weekdays, interval, intervalMinutes),
+    [mode, hour, minute, weekdays, interval, intervalMinutes],
+  );
   const summary = humanReadable(cron);
 
   useEffect(() => {
@@ -141,9 +158,13 @@ function ScheduleCard({
       include_image: includeImage,
       account_selections: accountSel,
       end_at: endAt,
-      auto_publish: autoPublish,
-      topic_mode: topicMode,
+      // Folder mode forces auto-publish (no AI draft step).
+      auto_publish: sourceType === 'folder' ? true : autoPublish,
+      topic_mode: sourceType === 'folder' ? false : topicMode,
       variation_hints: variationHints,
+      source_type: sourceType,
+      folder_path: folderPath.trim(),
+      posts_per_run: postsPerRun,
     });
   };
 
@@ -172,76 +193,144 @@ function ScheduleCard({
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Daily AI Trends Digest" />
             </div>
 
-            <div className="space-y-1.5">
-              <Label className="text-xs flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5" /> {topicMode ? 'Campaign Topic' : 'AI Prompt'}
-              </Label>
-              <Textarea
-                value={aiPrompt}
-                onChange={(e) => setAiPrompt(e.target.value)}
-                rows={4}
-                placeholder={topicMode
-                  ? "Topic the AI should keep posting about, e.g. 'Sustainable urban gardening for beginners'"
-                  : "What should the AI write about each run? e.g. 'Latest AI news this week, focus on developer tools'"}
-              />
-              <p className="text-xs text-muted-foreground">
-                {topicMode
-                  ? 'Each run, the AI rotates a fresh angle (story, contrarian take, data, tip, question…) so the campaign feels human and varied.'
-                  : 'Same prompt is sent to the agent every run. Each result is saved as a draft and previewed in Telegram.'}
+            {/* ── Source mode: AI vs Local Folder ─────────────────────── */}
+            <div className="space-y-2">
+              <Label className="text-xs">Post Source</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant={sourceType === 'ai' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setSourceType('ai')}
+                >AI-generated</Button>
+                <Button
+                  variant={sourceType === 'folder' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setSourceType('folder')}
+                >Local folder</Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {sourceType === 'folder'
+                  ? 'Local worker scans the folder, pairs each .txt caption with its sibling image(s) (.jpg/.png/.webp) by filename stem, and publishes via the same pipeline as "Publish now". Telegram is notified per post.'
+                  : 'Each tick the AI writes a fresh post (or topic-campaign variation) and publishes / drafts it.'}
               </p>
             </div>
 
-            {/* ── Post Campaign controls ─────────────────────────────── */}
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 space-y-3">
-              <div className="flex items-start gap-3">
-                <Switch checked={topicMode} onCheckedChange={setTopicMode} />
-                <div className="flex-1 min-w-0">
-                  <Label className="text-xs font-medium">Topic Campaign Mode</Label>
-                  <p className="text-[11px] text-muted-foreground">
-                    AI acts as a creative SMM manager — varies hooks, angles, and tone every run so consecutive posts on the same topic stay fresh.
-                  </p>
+            {sourceType === 'folder' && (
+              <div className="space-y-1.5">
+                <Label className="text-xs">Folder path (absolute)</Label>
+                <Input
+                  value={folderPath}
+                  onChange={(e) => setFolderPath(e.target.value)}
+                  placeholder="D:\\news posts"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Paste the full path. The local worker reads this folder; processed files are remembered so nothing reposts.
+                </p>
+              </div>
+            )}
+
+            {sourceType === 'ai' && (
+              <div className="space-y-1.5">
+                <Label className="text-xs flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" /> {topicMode ? 'Campaign Topic' : 'AI Prompt'}
+                </Label>
+                <Textarea
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  rows={4}
+                  placeholder={topicMode
+                    ? "Topic the AI should keep posting about, e.g. 'Sustainable urban gardening for beginners'"
+                    : "What should the AI write about each run? e.g. 'Latest AI news this week, focus on developer tools'"}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {topicMode
+                    ? 'Each run, the AI rotates a fresh angle (story, contrarian take, data, tip, question…) so the campaign feels human and varied.'
+                    : 'Same prompt is sent to the agent every run. Each result is saved as a draft and previewed in Telegram.'}
+                </p>
+              </div>
+            )}
+
+            {sourceType === 'ai' && (
+              <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 space-y-3">
+                <div className="flex items-start gap-3">
+                  <Switch checked={topicMode} onCheckedChange={setTopicMode} />
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-xs font-medium">Topic Campaign Mode</Label>
+                    <p className="text-[11px] text-muted-foreground">
+                      AI acts as a creative SMM manager — varies hooks, angles, and tone every run so consecutive posts on the same topic stay fresh.
+                    </p>
+                  </div>
+                </div>
+
+                {topicMode && (
+                  <div className="space-y-1.5 pl-9">
+                    <Label className="text-xs">Variation Angles (optional, comma-separated)</Label>
+                    <Input
+                      value={variationHintsRaw}
+                      onChange={(e) => setVariationHintsRaw(e.target.value)}
+                      placeholder="contrarian take, story, data insight, quick tip, behind-the-scenes"
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-start gap-3 border-t pt-3">
+                  <Switch checked={autoPublish} onCheckedChange={setAutoPublish} />
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-xs font-medium">Auto-Publish to Selected Accounts</Label>
+                    <p className="text-[11px] text-muted-foreground">
+                      {autoPublish
+                        ? '⚠ Posts go LIVE automatically each run — no manual approval.'
+                        : 'Off: each run saves a draft and pings Telegram for manual approval.'}
+                    </p>
+                  </div>
                 </div>
               </div>
+            )}
 
-              {topicMode && (
-                <div className="space-y-1.5 pl-9">
-                  <Label className="text-xs">Variation Angles (optional, comma-separated)</Label>
-                  <Input
-                    value={variationHintsRaw}
-                    onChange={(e) => setVariationHintsRaw(e.target.value)}
-                    placeholder="contrarian take, story, data insight, quick tip, behind-the-scenes"
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    Leave empty to use the built-in rotation (10 angles). Custom hints rotate in order each run.
-                  </p>
-                </div>
-              )}
-
-              <div className="flex items-start gap-3 border-t pt-3">
-                <Switch checked={autoPublish} onCheckedChange={setAutoPublish} />
-                <div className="flex-1 min-w-0">
-                  <Label className="text-xs font-medium">Auto-Publish to Selected Accounts</Label>
-                  <p className="text-[11px] text-muted-foreground">
-                    {autoPublish
-                      ? '⚠ Posts go LIVE automatically each run — no manual approval. Make sure platforms & accounts below are correct.'
-                      : 'Off: each run saves a draft and pings Telegram for manual approval.'}
-                  </p>
-                </div>
+            {sourceType === 'ai' && (
+              <div className="flex items-center gap-3">
+                <Checkbox id={`img-${schedule.id ?? 'new'}`} checked={includeImage} onCheckedChange={(v) => setIncludeImage(!!v)} />
+                <Label htmlFor={`img-${schedule.id ?? 'new'}`} className="text-xs">Include AI-generated image</Label>
               </div>
-            </div>
+            )}
 
-            <div className="flex items-center gap-3">
-              <Checkbox id={`img-${schedule.id ?? 'new'}`} checked={includeImage} onCheckedChange={(v) => setIncludeImage(!!v)} />
-              <Label htmlFor={`img-${schedule.id ?? 'new'}`} className="text-xs">Include AI-generated image</Label>
+            {/* ── Batch size (posts per tick) ─────────────────────────── */}
+            <div className="space-y-1.5">
+              <Label className="text-xs">Posts per run</Label>
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                value={postsPerRun}
+                onChange={(e) => setPostsPerRun(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                How many posts to publish each time the schedule fires (1–20). Combine with the interval below to control posting cadence.
+              </p>
             </div>
 
             <div className="space-y-3">
               <Label className="text-xs flex items-center gap-1.5"><Repeat className="w-3.5 h-3.5" /> Frequency</Label>
-              <div className="grid grid-cols-3 gap-2">
-                {(['hourly', 'daily', 'weekly'] as FrequencyMode[]).map((m) => (
+              <div className="grid grid-cols-4 gap-2">
+                {(['interval', 'hourly', 'daily', 'weekly'] as FrequencyMode[]).map((m) => (
                   <Button key={m} variant={mode === m ? 'default' : 'outline'} size="sm" onClick={() => setMode(m)} className="capitalize">{m}</Button>
                 ))}
               </div>
+
+              {mode === 'interval' && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Every N minutes</Label>
+                  <Select value={String(intervalMinutes)} onValueChange={(v) => setIntervalMinutes(Number(v))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {INTERVAL_MINUTE_OPTIONS.map((n) => <SelectItem key={n} value={String(n)}>Every {n} min</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">
+                    Fires continuously. With {postsPerRun} post(s) per run, that publishes ~{Math.round((60 / intervalMinutes) * postsPerRun)} post(s) per hour.
+                  </p>
+                </div>
+              )}
 
               {mode === 'hourly' && (
                 <div className="grid grid-cols-2 gap-3">
@@ -443,6 +532,9 @@ export default function GenerationScheduler() {
     auto_publish: false,
     topic_mode: true,
     variation_hints: [],
+    source_type: 'ai',
+    folder_path: '',
+    posts_per_run: 1,
   }]);
 
   return (

@@ -615,11 +615,15 @@ export interface GenerationSchedule {
   end_at: string | null;
   last_run_at: string | null;
   updated_at: string;
-  // Post Campaign extensions
-  auto_publish?: boolean;        // when true, drafts are immediately queued for publishing
-  topic_mode?: boolean;          // treat ai_prompt as an evergreen topic; AI varies angle each run
-  variation_hints?: string[];    // optional rotating angles/styles ("contrarian", "story", "data-driven"…)
+  auto_publish?: boolean;
+  topic_mode?: boolean;
+  variation_hints?: string[];
   run_count?: number;
+  // Folder + batch extensions (parity with video-upload scheduler)
+  source_type?: 'ai' | 'folder';
+  folder_path?: string;
+  posts_per_run?: number;
+  imported_files?: string[];
 }
 
 export async function listGenerationSchedules(): Promise<GenerationSchedule[]> {
@@ -632,6 +636,7 @@ export async function listGenerationSchedules(): Promise<GenerationSchedule[]> {
     ...r,
     target_platforms: r.target_platforms || [],
     account_selections: r.account_selections || {},
+    imported_files: r.imported_files || [],
   })) as GenerationSchedule[];
 }
 
@@ -649,6 +654,9 @@ export async function saveGenerationSchedule(s: Partial<GenerationSchedule>): Pr
     auto_publish: !!s.auto_publish,
     topic_mode: !!s.topic_mode,
     variation_hints: s.variation_hints || [],
+    source_type: s.source_type === 'folder' ? 'folder' : 'ai',
+    folder_path: s.folder_path || '',
+    posts_per_run: Math.max(1, Math.min(20, Number(s.posts_per_run) || 1)),
   };
   if (s.id) {
     const { data, error } = await (supabase as any)
