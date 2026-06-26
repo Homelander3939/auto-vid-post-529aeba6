@@ -25,11 +25,12 @@ import {
   type GenerationSchedule, type SocialAccount,
 } from '@/lib/socialPosts';
 
-type FrequencyMode = 'hourly' | 'daily' | 'weekly';
+type FrequencyMode = 'interval' | 'hourly' | 'daily' | 'weekly';
 type DurationUnit = 'hours' | 'days' | 'weeks';
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const DAYS_OF_WEEK = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const PLATFORM_LABELS: Record<string, string> = { x: 'X', linkedin: 'LinkedIn', facebook: 'Facebook' };
+const INTERVAL_MINUTE_OPTIONS = [5, 10, 15, 20, 30, 45];
 
 function clampMinute(v: number) {
   if (Number.isNaN(v)) return 0;
@@ -38,23 +39,29 @@ function clampMinute(v: number) {
 
 function cronToState(cron: string) {
   const parts = (cron || '0 9 * * *').split(' ');
-  if (parts.length !== 5) return { mode: 'daily' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1 };
+  if (parts.length !== 5) return { mode: 'daily' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes: 10 };
   const [min, hr, , , dow] = parts;
+  // Interval mode: */N minutes
+  if (min.startsWith('*/') && hr === '*') {
+    const intervalMinutes = parseInt(min.replace('*/', ''), 10) || 10;
+    return { mode: 'interval' as FrequencyMode, minute: 0, hour: 9, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes };
+  }
   const minute = min === '*' ? 0 : parseInt(min) || 0;
   const hour = hr === '*' ? 0 : parseInt(hr.replace('*/', '')) || 9;
   if (hr === '*' || hr.startsWith('*/')) {
     const interval = hr === '*' ? 1 : parseInt(hr.replace('*/', '')) || 1;
-    return { mode: 'hourly' as FrequencyMode, minute, hour: interval, weekdays: [1,2,3,4,5], interval };
+    return { mode: 'hourly' as FrequencyMode, minute, hour: interval, weekdays: [1,2,3,4,5], interval, intervalMinutes: 10 };
   }
   if (dow !== '*') {
     const weekdays = dow.split(',').map(Number).filter((n) => !isNaN(n));
-    return { mode: 'weekly' as FrequencyMode, minute, hour, weekdays, interval: 1 };
+    return { mode: 'weekly' as FrequencyMode, minute, hour, weekdays, interval: 1, intervalMinutes: 10 };
   }
-  return { mode: 'daily' as FrequencyMode, minute, hour, weekdays: [1,2,3,4,5], interval: 1 };
+  return { mode: 'daily' as FrequencyMode, minute, hour, weekdays: [1,2,3,4,5], interval: 1, intervalMinutes: 10 };
 }
 
-function stateToCron(mode: FrequencyMode, hour: number, minute: number, weekdays: number[], interval: number) {
+function stateToCron(mode: FrequencyMode, hour: number, minute: number, weekdays: number[], interval: number, intervalMinutes: number) {
   switch (mode) {
+    case 'interval': return `*/${Math.max(1, intervalMinutes)} * * * *`;
     case 'hourly': return interval === 1 ? `${minute} * * * *` : `${minute} */${interval} * * *`;
     case 'daily':  return `${minute} ${hour} * * *`;
     case 'weekly': return `${minute} ${hour} * * ${weekdays.sort().join(',')}`;
@@ -65,6 +72,7 @@ function humanReadable(cron: string) {
   const s = cronToState(cron);
   const t = `${s.hour.toString().padStart(2, '0')}:${s.minute.toString().padStart(2, '0')}`;
   switch (s.mode) {
+    case 'interval': return `Every ${s.intervalMinutes} min`;
     case 'hourly': return s.interval === 1 ? `Every hour at :${s.minute.toString().padStart(2, '0')}` : `Every ${s.interval}h at :${s.minute.toString().padStart(2, '0')}`;
     case 'daily':  return `Daily at ${t}`;
     case 'weekly': return `${s.weekdays.sort().map((d) => DAYS_OF_WEEK[d]).join(', ')} at ${t}`;
