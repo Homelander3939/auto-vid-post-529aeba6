@@ -70,6 +70,13 @@ Deno.serve(async (req) => {
 
   for (const s of (schedules || [])) {
     if (forceId && s.id !== forceId) continue;
+    // Folder-source schedules are owned by the local worker (it reads .txt + images
+    // from disk and publishes via the same pipeline as "Publish now"). Skip here so
+    // we don't double-fire.
+    if ((s as any).source_type === 'folder') {
+      skipped.push({ id: s.id, reason: 'folder-source-handled-by-local-worker' });
+      continue;
+    }
     if (s.end_at && new Date(s.end_at).getTime() < now.getTime()) {
       skipped.push({ id: s.id, reason: 'expired' });
       continue;
