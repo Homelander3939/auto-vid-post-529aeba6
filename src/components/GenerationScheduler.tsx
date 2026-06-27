@@ -622,7 +622,7 @@ export default function GenerationScheduler() {
           accounts={accounts}
           onSave={(updated) => handleSave(updated)}
           onDelete={() => handleDelete(s.id)}
-          onRunNow={() => handleRunNow(s.id)}
+          onRunNow={(e?: any) => handleRunNow(s.id, !!(e && (e.shiftKey || e.altKey)))}
         />
       ))}
 
