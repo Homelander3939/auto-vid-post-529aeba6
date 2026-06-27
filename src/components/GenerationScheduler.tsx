@@ -143,12 +143,43 @@ function ScheduleCard({
     return m;
   }, [accounts]);
 
+  // Auto-default account selection for each chosen platform (parity with video
+  // upload scheduler) so the worker never fails with "No enabled account
+  // selected" just because the user did not open the picker.
+  useEffect(() => {
+    setAccountSel((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const p of platforms) {
+        const list = accountsByPlatform[p] || [];
+        if (!list.length) continue;
+        if (!next[p] || !list.find((a) => a.id === next[p])) {
+          const def = list.find((a) => a.is_default) || list[0];
+          next[p] = def.id;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [platforms, accountsByPlatform]);
+
   const togglePlatform = (p: string) => setPlatforms((prev) => prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]);
   const toggleWeekday = (d: number) => setWeekdays((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);
 
   const handleSave = () => {
     const variationHints = variationHintsRaw
       .split(/[,\n]+/).map((h) => h.trim()).filter(Boolean);
+    // Make sure every selected platform has a concrete account_id, picking the
+    // default/first enabled one when the user didn't open the picker.
+    const finalAccountSel: Record<string, string> = { ...accountSel };
+    for (const p of platforms) {
+      const list = accountsByPlatform[p] || [];
+      if (!list.length) continue;
+      if (!finalAccountSel[p] || !list.find((a) => a.id === finalAccountSel[p])) {
+        const def = list.find((a) => a.is_default) || list[0];
+        finalAccountSel[p] = def.id;
+      }
+    }
     onSave({
       ...schedule,
       name: name || 'Generation Schedule',
@@ -156,7 +187,7 @@ function ScheduleCard({
       target_platforms: platforms,
       ai_prompt: aiPrompt,
       include_image: includeImage,
-      account_selections: accountSel,
+      account_selections: finalAccountSel,
       end_at: endAt,
       // Folder mode forces auto-publish (no AI draft step).
       auto_publish: sourceType === 'folder' ? true : autoPublish,
@@ -427,7 +458,16 @@ function ScheduleCard({
 
             {platforms.map((p) => {
               const list = accountsByPlatform[p] || [];
-              if (list.length <= 1) return null;
+              if (list.length === 0) {
+                return (
+                  <div key={p} className="space-y-1.5">
+                    <Label className="text-xs">{PLATFORM_LABELS[p]} Account</Label>
+                    <p className="text-[11px] text-destructive">
+                      No enabled {PLATFORM_LABELS[p]} account — add one in Settings or scheduled posts will fail.
+                    </p>
+                  </div>
+                );
+              }
               return (
                 <div key={p} className="space-y-1.5">
                   <Label className="text-xs">{PLATFORM_LABELS[p]} Account</Label>
