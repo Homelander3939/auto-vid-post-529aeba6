@@ -3195,11 +3195,10 @@ app.post('/api/recurring/run-now', async (req, res) => {
 // Trigger a folder-based social post schedule immediately, regardless of cron.
 app.post('/api/social-folder-schedules/run-now', async (req, res) => {
   try {
-    const { id } = req.body || {};
+    const { id, ignoreImported } = req.body || {};
     if (!id) return res.status(400).json({ error: 'id required' });
-    processSocialFolderSchedules({ onlyId: id, force: true })
-      .catch((e) => console.error('[FolderSched] run-now error:', e.message));
-    res.json({ ok: true });
+    const summary = await processSocialFolderSchedules({ onlyId: id, force: true, ignoreImported: !!ignoreImported });
+    res.json({ ok: true, summary });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3207,18 +3206,13 @@ app.post('/api/social-folder-schedules/run-now', async (req, res) => {
 
 app.post('/api/generation-schedules/run-now', async (req, res) => {
   try {
-    const { scheduleId } = req.body || {};
+    const { scheduleId, ignoreImported } = req.body || {};
     const { data: schedule, error } = await supabase.from('social_post_schedules').select('*').eq('id', scheduleId).single();
     if (error || !schedule) return res.status(404).json({ error: 'Schedule not found' });
 
-    // Folder-source schedules: hand off to the folder processor, which scans the
-    // local folder for .txt + image bundles and queues social_posts using the
-    // schedule's account_selections + target_platforms (same pipeline as manual
-    // "Publish now"). No AI prompt is required.
     if (schedule.source_type === 'folder') {
-      processSocialFolderSchedules({ onlyId: schedule.id, force: true })
-        .catch((e) => console.error('[FolderSched] run-now error:', e.message));
-      return res.json({ ok: true, mode: 'folder' });
+      const summary = await processSocialFolderSchedules({ onlyId: schedule.id, force: true, ignoreImported: !!ignoreImported });
+      return res.json({ ok: true, mode: 'folder', summary });
     }
 
     if (!schedule.ai_prompt || !Array.isArray(schedule.target_platforms) || schedule.target_platforms.length === 0) {
