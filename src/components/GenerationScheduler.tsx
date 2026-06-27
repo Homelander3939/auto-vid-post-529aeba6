@@ -458,7 +458,16 @@ function ScheduleCard({
 
             {platforms.map((p) => {
               const list = accountsByPlatform[p] || [];
-              if (list.length <= 1) return null;
+              if (list.length === 0) {
+                return (
+                  <div key={p} className="space-y-1.5">
+                    <Label className="text-xs">{PLATFORM_LABELS[p]} Account</Label>
+                    <p className="text-[11px] text-destructive">
+                      No enabled {PLATFORM_LABELS[p]} account — add one in Settings or scheduled posts will fail.
+                    </p>
+                  </div>
+                );
+              }
               return (
                 <div key={p} className="space-y-1.5">
                   <Label className="text-xs">{PLATFORM_LABELS[p]} Account</Label>
