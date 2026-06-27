@@ -145,15 +145,25 @@ export default function FolderPostScheduler() {
     load();
   };
 
-  const runNow = async (id: number) => {
+  const runNow = async (id: number, ignoreImported = false) => {
     try {
       const r = await fetch('http://localhost:3001/api/social-folder-schedules/run-now', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, ignoreImported }),
       });
-      if (!r.ok) throw new Error(await r.text());
-      toast({ title: 'Triggered', description: 'Scanning folder + queuing posts now.' });
+      const data = await r.json().catch(() => ({} as any));
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      const s = data?.summary?.schedules?.[0];
+      const queued = data?.summary?.queued ?? 0;
+      const errs: string[] = data?.summary?.errors || [];
+      if (queued > 0) {
+        toast({ title: `Queued ${queued} post(s)`, description: s ? s.queuedFiles.slice(0,3).join(', ') : '' });
+      } else if (errs.length) {
+        toast({ title: 'Errors', description: errs.slice(0,2).join(' · '), variant: 'destructive' });
+      } else if (s) {
+        toast({ title: 'Nothing queued', description: `${s.note} (scanned=${s.scanned}, alreadyImported=${s.alreadyImported}, missingImages=${s.missingImages}).` + (!ignoreImported && s.alreadyImported>0 ? ' Shift-click Run now to force re-run.' : '') });
+      }
       setTimeout(load, 1500);
     } catch (e: any) {
       toast({ title: 'Run failed', description: e.message, variant: 'destructive' });
