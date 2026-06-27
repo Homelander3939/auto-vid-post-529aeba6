@@ -278,7 +278,7 @@ export default function FolderPostScheduler() {
               </div>
               <p className="text-[11px] text-muted-foreground font-mono truncate">{s.folder_path}</p>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => runNow(s.id)} className="gap-1.5 h-7">
+                <Button size="sm" variant="outline" onClick={(e) => runNow(s.id, e.shiftKey || e.altKey)} title="Click = scan new bundles · Shift-click = re-publish already-imported bundles" className="gap-1.5 h-7">
                   <Play className="w-3 h-3" /> Run now
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => remove(s.id)} className="gap-1.5 h-7 text-destructive">
