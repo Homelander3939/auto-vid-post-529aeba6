@@ -3175,12 +3175,27 @@ app.post('/api/generation-schedules/run-now', async (req, res) => {
     const { scheduleId } = req.body || {};
     const { data: schedule, error } = await supabase.from('social_post_schedules').select('*').eq('id', scheduleId).single();
     if (error || !schedule) return res.status(404).json({ error: 'Schedule not found' });
+
+    // Folder-source schedules: hand off to the folder processor, which scans the
+    // local folder for .txt + image bundles and queues social_posts using the
+    // schedule's account_selections + target_platforms (same pipeline as manual
+    // "Publish now"). No AI prompt is required.
+    if (schedule.source_type === 'folder') {
+      processSocialFolderSchedules({ onlyId: schedule.id, force: true })
+        .catch((e) => console.error('[FolderSched] run-now error:', e.message));
+      return res.json({ ok: true, mode: 'folder' });
+    }
+
+    if (!schedule.ai_prompt || !Array.isArray(schedule.target_platforms) || schedule.target_platforms.length === 0) {
+      return res.status(400).json({ error: 'This schedule has no AI prompt or platforms — open it and fill them in, or switch it to Local folder mode.' });
+    }
+
     const result = await fetch(`http://localhost:${PORT}/api/generate-social-post`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt: schedule.ai_prompt,
-        platforms: schedule.target_platforms || ['x', 'linkedin', 'facebook'],
+        platforms: schedule.target_platforms,
         includeImage: schedule.include_image !== false,
         stream: false,
       }),
