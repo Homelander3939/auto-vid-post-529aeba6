@@ -90,7 +90,7 @@ function ScheduleCard({
   accounts: SocialAccount[];
   onSave: (s: GenerationSchedule) => void;
   onDelete?: () => void;
-  onRunNow?: () => void;
+  onRunNow?: (e?: any) => void;
 }) {
   const isNew = !schedule.id;
   const [expanded, setExpanded] = useState(isNew);
@@ -549,10 +549,25 @@ export default function GenerationScheduler() {
     catch (e: any) { toast({ title: 'Error', description: e.message, variant: 'destructive' }); }
   };
 
-  const handleRunNow = async (id: number) => {
+  const handleRunNow = async (id: number, ignoreImported = false) => {
     try {
-      await runGenerationScheduleNow(id);
-      toast({ title: 'Triggered', description: 'Generation started — watch the Job Queue.' });
+      const r = await runGenerationScheduleNow(id, { ignoreImported });
+      const s = r?.summary?.schedules?.[0];
+      const queued = r?.summary?.queued ?? 0;
+      const errs = r?.summary?.errors || [];
+      if (queued > 0) {
+        toast({ title: `Queued ${queued} post(s)`, description: s ? `${s.queuedFiles.slice(0,3).join(', ')}${s.queuedFiles.length>3?'…':''}` : 'Publishing now.' });
+      } else if (errs.length) {
+        toast({ title: 'Run finished with errors', description: errs.slice(0,2).join(' · '), variant: 'destructive' });
+      } else if (s) {
+        toast({
+          title: 'Nothing queued',
+          description: `${s.note} (scanned=${s.scanned}, alreadyImported=${s.alreadyImported}, missingImages=${s.missingImages}).` + (!ignoreImported && s.alreadyImported > 0 ? ' Click Run now again with Shift to force re-run.' : ''),
+        });
+      } else {
+        toast({ title: 'Triggered', description: 'No summary returned.' });
+      }
+      refresh();
     } catch (e: any) {
       toast({ title: 'Trigger failed', description: e.message, variant: 'destructive' });
     }
@@ -607,7 +622,7 @@ export default function GenerationScheduler() {
           accounts={accounts}
           onSave={(updated) => handleSave(updated)}
           onDelete={() => handleDelete(s.id)}
-          onRunNow={() => handleRunNow(s.id)}
+          onRunNow={(e?: any) => handleRunNow(s.id, !!(e && (e.shiftKey || e.altKey)))}
         />
       ))}
 

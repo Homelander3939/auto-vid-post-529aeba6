@@ -2608,12 +2608,16 @@ async function processRecurringSchedule(opts = {}) {
 // the images to Supabase storage, and creates social_posts rows so the existing
 // social-post poller publishes them immediately.
 async function processSocialFolderSchedules(opts = {}) {
-  const { onlyId = null, force = false } = opts;
+  const { onlyId = null, force = false, ignoreImported = false } = opts;
+  const summary = { schedules: [], queued: 0, scanned: 0, skipped: 0, errors: [] };
   try {
     let query = supabase.from('social_post_schedules').select('*').eq('source_type', 'folder');
     if (onlyId) query = query.eq('id', onlyId); else query = query.eq('enabled', true);
     const { data: schedules } = await query;
-    if (!schedules || !schedules.length) return;
+    if (!schedules || !schedules.length) {
+      summary.errors.push(onlyId ? `Schedule ${onlyId} not found or not folder-source.` : 'No folder schedules.');
+      return summary;
+    }
 
     const now = new Date();
     const currentMinute = now.getMinutes();
@@ -2621,9 +2625,12 @@ async function processSocialFolderSchedules(opts = {}) {
     const currentDow = now.getDay();
 
     for (const sched of schedules) {
+      const sSum = { id: sched.id, name: sched.name, folder: sched.folder_path, scanned: 0, ready: 0, queued: 0, alreadyImported: 0, missingImages: 0, queuedFiles: [], note: '' };
+      summary.schedules.push(sSum);
       try {
         if (sched.end_at && new Date(sched.end_at) < now) {
           await supabase.from('social_post_schedules').update({ enabled: false }).eq('id', sched.id);
+          sSum.note = 'expired — disabled';
           continue;
         }
         if (!force) {
@@ -2634,29 +2641,30 @@ async function processSocialFolderSchedules(opts = {}) {
           const hrMatch = cHr === '*'
             || (cHr.startsWith('*/') ? currentHour % parseInt(cHr.replace('*/', '')) === 0 : parseInt(cHr) === currentHour);
           const dowMatch = cDow === '*' || cDow.split(',').map(Number).includes(currentDow);
-          if (!minMatch || !hrMatch || !dowMatch) continue;
+          if (!minMatch || !hrMatch || !dowMatch) { sSum.note = 'not-due'; continue; }
           if (sched.last_run_at) {
             const last = new Date(sched.last_run_at);
-            if (now.getTime() - last.getTime() < 90_000) continue;
+            if (now.getTime() - last.getTime() < 90_000) { sSum.note = 'ran <90s ago'; continue; }
           }
         }
 
         const folderPath = String(sched.folder_path || '').trim();
-        if (!folderPath) {
-          console.log(`[FolderSched] Schedule ${sched.id} has no folder_path, skipping`);
-          continue;
-        }
+        if (!folderPath) { sSum.note = 'no folder_path'; continue; }
 
         let bundles = [];
         try { bundles = scanLocalBundles(folderPath); }
-        catch (e) {
-          console.error(`[FolderSched] Scan failed: ${e.message}`);
-          continue;
-        }
+        catch (e) { sSum.note = `scan failed: ${e.message}`; summary.errors.push(`${sched.name}: ${e.message}`); continue; }
 
-        const already = new Set(sched.imported_files || []);
+        sSum.scanned = bundles.length;
+        const already = new Set(ignoreImported ? [] : (sched.imported_files || []));
+        const alreadyCount = bundles.filter((b) => already.has(b.manifestName)).length;
+        const missingCount = bundles.filter((b) => !already.has(b.manifestName) && (b.images.length === 0 || b.images.some((i) => i.missing))).length;
+        sSum.alreadyImported = alreadyCount;
+        sSum.missingImages = missingCount;
+
         const ready = bundles.filter((b) => !already.has(b.manifestName)
           && b.images.length > 0 && b.images.every((i) => !i.missing));
+        sSum.ready = ready.length;
         const perRun = Math.max(1, Number(sched.posts_per_run) || 1);
         const pick = ready.slice(0, perRun);
 
@@ -2667,16 +2675,34 @@ async function processSocialFolderSchedules(opts = {}) {
         }).eq('id', sched.id);
 
         if (pick.length === 0) {
-          console.log(`[FolderSched] "${sched.name}": nothing new in ${folderPath}`);
+          sSum.note = `nothing to queue (scanned=${bundles.length}, alreadyImported=${alreadyCount}, missingImages=${missingCount}). Tip: use Force re-run to ignore the imported list.`;
+          console.log(`[FolderSched] "${sched.name}": ${sSum.note}`);
           continue;
         }
 
         const requestedPlatforms = Array.isArray(sched.target_platforms) && sched.target_platforms.length
           ? sched.target_platforms
           : ['x', 'linkedin', 'facebook'];
-        const accountSelections = (sched.account_selections && typeof sched.account_selections === 'object')
-          ? sched.account_selections
-          : {};
+
+        // Resolve account selections. If empty (legacy schedules) auto-pick the
+        // default/first enabled account per platform — otherwise nothing posts.
+        const accountSelections = { ...((sched.account_selections && typeof sched.account_selections === 'object') ? sched.account_selections : {}) };
+        const missingAcc = requestedPlatforms.filter((p) => !accountSelections[p]);
+        if (missingAcc.length) {
+          const { data: accts } = await supabase.from('social_post_accounts')
+            .select('id, platform, is_default, enabled').in('platform', missingAcc).eq('enabled', true);
+          for (const p of missingAcc) {
+            const list = (accts || []).filter((a) => a.platform === p);
+            const def = list.find((a) => a.is_default) || list[0];
+            if (def) accountSelections[p] = def.id;
+          }
+          const stillMissing = requestedPlatforms.filter((p) => !accountSelections[p]);
+          if (stillMissing.length) {
+            sSum.note = `no enabled account for: ${stillMissing.join(', ')}. Open the schedule and pick accounts, or enable an account on the Accounts page.`;
+            summary.errors.push(`${sched.name}: ${sSum.note}`);
+            continue;
+          }
+        }
 
         const newlyImported = [];
         for (const bundle of pick) {
@@ -2701,9 +2727,13 @@ async function processSocialFolderSchedules(opts = {}) {
               source_meta: { folder: folderPath, files: sourceFiles },
             });
             newlyImported.push(bundle.manifestName);
+            sSum.queuedFiles.push(bundle.manifestName);
+            sSum.queued += 1;
+            summary.queued += 1;
             console.log(`[FolderSched] Queued post from ${bundle.manifestName}`);
           } catch (e) {
             console.error(`[FolderSched] Failed to queue ${bundle.manifestName}:`, e.message);
+            summary.errors.push(`${bundle.manifestName}: ${e.message}`);
           }
         }
 
@@ -2711,13 +2741,18 @@ async function processSocialFolderSchedules(opts = {}) {
           const merged = Array.from(new Set([...(sched.imported_files || []), ...newlyImported])).slice(-2000);
           await supabase.from('social_post_schedules').update({ imported_files: merged }).eq('id', sched.id);
         }
+        sSum.note = `queued ${sSum.queued} post(s) → poller will publish.`;
       } catch (e) {
         console.error(`[FolderSched] Schedule ${sched.id} error:`, e.message);
+        sSum.note = `error: ${e.message}`;
+        summary.errors.push(`${sched.name}: ${e.message}`);
       }
     }
   } catch (e) {
     console.error('[FolderSched] Error:', e.message);
+    summary.errors.push(e.message);
   }
+  return summary;
 }
 
 
@@ -3160,11 +3195,10 @@ app.post('/api/recurring/run-now', async (req, res) => {
 // Trigger a folder-based social post schedule immediately, regardless of cron.
 app.post('/api/social-folder-schedules/run-now', async (req, res) => {
   try {
-    const { id } = req.body || {};
+    const { id, ignoreImported } = req.body || {};
     if (!id) return res.status(400).json({ error: 'id required' });
-    processSocialFolderSchedules({ onlyId: id, force: true })
-      .catch((e) => console.error('[FolderSched] run-now error:', e.message));
-    res.json({ ok: true });
+    const summary = await processSocialFolderSchedules({ onlyId: id, force: true, ignoreImported: !!ignoreImported });
+    res.json({ ok: true, summary });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3172,18 +3206,13 @@ app.post('/api/social-folder-schedules/run-now', async (req, res) => {
 
 app.post('/api/generation-schedules/run-now', async (req, res) => {
   try {
-    const { scheduleId } = req.body || {};
+    const { scheduleId, ignoreImported } = req.body || {};
     const { data: schedule, error } = await supabase.from('social_post_schedules').select('*').eq('id', scheduleId).single();
     if (error || !schedule) return res.status(404).json({ error: 'Schedule not found' });
 
-    // Folder-source schedules: hand off to the folder processor, which scans the
-    // local folder for .txt + image bundles and queues social_posts using the
-    // schedule's account_selections + target_platforms (same pipeline as manual
-    // "Publish now"). No AI prompt is required.
     if (schedule.source_type === 'folder') {
-      processSocialFolderSchedules({ onlyId: schedule.id, force: true })
-        .catch((e) => console.error('[FolderSched] run-now error:', e.message));
-      return res.json({ ok: true, mode: 'folder' });
+      const summary = await processSocialFolderSchedules({ onlyId: schedule.id, force: true, ignoreImported: !!ignoreImported });
+      return res.json({ ok: true, mode: 'folder', summary });
     }
 
     if (!schedule.ai_prompt || !Array.isArray(schedule.target_platforms) || schedule.target_platforms.length === 0) {

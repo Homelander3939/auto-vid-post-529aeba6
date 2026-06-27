@@ -675,7 +675,16 @@ export async function deleteGenerationSchedule(id: number): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+export interface RunNowSummary {
+  mode?: string;
+  summary?: {
+    queued: number;
+    errors: string[];
+    schedules: Array<{ id: number; name: string; folder?: string; scanned: number; ready: number; queued: number; alreadyImported: number; missingImages: number; queuedFiles: string[]; note: string }>;
+  };
+}
+
 // Manually trigger a single schedule run (mostly for "Run now" testing).
-export async function runGenerationScheduleNow(id: number): Promise<void> {
-  await callLocalWorker('/api/generation-schedules/run-now', { scheduleId: id, force: true }, 120_000);
+export async function runGenerationScheduleNow(id: number, opts: { ignoreImported?: boolean } = {}): Promise<RunNowSummary> {
+  return await callLocalWorker<RunNowSummary>('/api/generation-schedules/run-now', { scheduleId: id, force: true, ignoreImported: !!opts.ignoreImported }, 120_000);
 }
