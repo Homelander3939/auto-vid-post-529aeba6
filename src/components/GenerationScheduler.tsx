@@ -90,7 +90,7 @@ function ScheduleCard({
   accounts: SocialAccount[];
   onSave: (s: GenerationSchedule) => void;
   onDelete?: () => void;
-  onRunNow?: () => void;
+  onRunNow?: (e?: any) => void;
 }) {
   const isNew = !schedule.id;
   const [expanded, setExpanded] = useState(isNew);
