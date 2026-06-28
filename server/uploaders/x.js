@@ -109,30 +109,37 @@ async function insertXText(page, textArea, text) {
   await page.keyboard.press('Backspace').catch(() => {});
   await page.waitForTimeout(250);
 
-  // X is React-controlled. Directly setting textContent can make text appear
-  // visually while the internal composer state remains empty, producing a
-  // media-only post. Use real keyboard insertion first so React receives the
-  // same input events a human typing/pasting would create.
-  await page.keyboard.insertText(text || '').catch(() => {});
-  await page.waitForTimeout(400);
+  // X is React-controlled. CDP keyboard insertion can make text appear while
+  // React's composer state remains empty, so the media-only Post button becomes
+  // enabled and publishes photos without text. execCommand('insertText') fires
+  // the beforeinput/input sequence React listens for; use it as the primary path.
+  const desired = String(text || '');
+  if (!desired) return;
+  const inserted = await textArea.evaluate((el, value) => {
+    el.focus();
+    let ok = false;
+    const chunks = String(value || '').match(/[\s\S]{1,24}/g) || [];
+    for (const chunk of chunks) ok = document.execCommand('insertText', false, chunk) || ok;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    const visible = (el.innerText || el.textContent || '').trim();
+    return { ok, visible };
+  }, desired).catch(() => ({ ok: false, visible: '' }));
 
-  let visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
-  if (!visibleText && text) {
+  let visibleText = String(inserted?.visible || '').trim();
+  if ((!inserted?.ok || !visibleText) && desired) {
     await textArea.click().catch(() => {});
-    await page.keyboard.type(text, { delay: 1 }).catch(() => {});
+    await page.keyboard.insertText(desired).catch(() => {});
     await page.waitForTimeout(400);
     visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
   }
-  if (!visibleText && text) {
-    const inserted = await textArea.evaluate((el, value) => {
-      el.focus();
-      const ok = document.execCommand('insertText', false, value || '');
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return ok || Boolean((el.innerText || el.textContent || '').trim());
-    }, text).catch(() => false);
-    if (!inserted) throw new Error('X composer text could not be inserted. Leaving source files for retry.');
+  if (!visibleText && desired) {
+    await textArea.click().catch(() => {});
+    await page.keyboard.type(desired, { delay: 1 }).catch(() => {});
+    await page.waitForTimeout(400);
+    visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
   }
+  if (!visibleText) throw new Error('X composer text could not be inserted. Leaving source files for retry.');
 }
 
 async function ensureXTextWithinLimit(page, textArea, desiredText) {
