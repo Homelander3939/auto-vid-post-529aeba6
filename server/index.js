@@ -1943,6 +1943,65 @@ function stripTechPulsePrefix(text) {
     .trim();
 }
 
+function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, fallbackXBody, platforms) {
+  const out = {};
+  const liPost = sections['LINKEDIN_POST'] || '';
+  const fbPost = sections['FACEBOOK_POST'] || '';
+  const xPost = sections['X_POST'] || '';
+  const liFb = sections['LINKEDIN_FACEBOOK_POST'] || '';
+  const xLegacy = sections['X_THREAD_OR_LONG_POST'] || '';
+
+  const links = articleUrlsBlock
+    ? '\n\n' + articleUrlsBlock.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+        const m = l.match(/^[^:]+:\s*(https?:\/\/.+)$/);
+        return m ? m[1] : l;
+      }).join('\n')
+    : '';
+
+  const liFinal = stripTechPulsePrefix((liPost || liFb || fallbackBody || '').trim());
+  const fbFinal = stripTechPulsePrefix((fbPost || liFb || fallbackBody || '').trim());
+  const xFinal = stripTechPulsePrefix((xPost || xLegacy || fallbackXBody || fallbackBody || '').trim());
+  const hasExplicitX = !!(xPost || xLegacy);
+  const hasExplicitLi = !!(liPost || liFb);
+  const hasExplicitFb = !!(fbPost || liFb);
+
+  for (const p of platforms) {
+    if (p === 'x' && xFinal) out.x = (xFinal + (hasExplicitX ? '' : links)).trim();
+    else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
+    else if (p === 'facebook' && fbFinal) out.facebook = (fbFinal + (hasExplicitFb ? '' : links)).trim();
+  }
+  return out;
+}
+
+function deriveSocialPostFallbackBody(rawText) {
+  const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
+  let inImagesList = false;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (/^---[A-Z_]+---$/.test(trimmed)) { i++; continue; }
+    if (/^images:\s*$/i.test(trimmed)) { inImagesList = true; i++; continue; }
+    if (inImagesList) {
+      if (!trimmed || /^\d+\.\s*.+$/.test(trimmed)) { i++; continue; }
+      inImagesList = false;
+    }
+    const headerMatch = trimmed.match(/^([a-zA-Z_]+):\s*(.+)?$/);
+    if (headerMatch) {
+      const k = headerMatch[1].toLowerCase();
+      if (['platforms', 'image_count', 'session', 'post_index', 'created_at', 'topic', 'campaign', 'source', 'upload_mode'].includes(k)) {
+        i++; continue;
+      }
+    }
+    if (/^TECHPULSE_SOCIAL_POST_V1$/i.test(trimmed)) { i++; continue; }
+    out.push(line);
+    i++;
+  }
+  const cleaned = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { body: cleaned, xBody: cleaned };
+}
+
 // Scan a folder, return parsed bundles. Each entry includes raw image bytes so
 // the caller can either base64-encode them (browser scan) or upload them to
 // Supabase storage (recurring schedule processor).
@@ -1957,21 +2016,18 @@ function scanLocalBundles(folderPath) {
   for (const txt of txts) {
     let content = '';
     try { content = fs.readFileSync(path.join(folderPath, txt), 'utf-8'); } catch { continue; }
-    if (!/TECHPULSE_SOCIAL_POST_V1/.test(content)) continue;
     const { headers, declaredImages, sections } = parseBundleManifest(content);
-    const platforms = (headers.platforms || '')
+    let platforms = (headers.platforms || '')
       .split(',').map((p) => normalizePlatformName(p)).filter(Boolean);
-    const liFb = sections['LINKEDIN_FACEBOOK_POST'] || '';
-    const xText = sections['X_THREAD_OR_LONG_POST'] || liFb;
-    const articleUrls = sections['ARTICLE_URLS'] || '';
-    const tail = articleUrls
-      ? '\n\n' + articleUrls.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
-          const m = l.match(/^[^:]+:\s*(https?:\/\/.+)$/); return m ? m[1] : l;
-        }).join('\n')
-      : '';
-    const texts = {};
-    if (liFb) { texts.linkedin = stripTechPulsePrefix(liFb + tail); texts.facebook = stripTechPulsePrefix(liFb + tail); }
-    if (xText) texts.x = stripTechPulsePrefix(xText);
+    if (platforms.length === 0) platforms = ['x', 'linkedin', 'facebook'];
+    const fallback = deriveSocialPostFallbackBody(content);
+    const texts = buildSocialPostPlatformTexts(
+      sections,
+      sections['ARTICLE_URLS'] || '',
+      fallback.body,
+      fallback.xBody,
+      platforms,
+    );
     // Auto-discover images by filename prefix when manifest doesn't list them.
     // Bundles like `2026-05-08-morning-post-01.txt` ↔
     // `2026-05-08-morning-post-01-story-01-*.jpg`.
