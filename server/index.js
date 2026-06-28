@@ -2718,8 +2718,12 @@ async function processSocialFolderSchedules(opts = {}) {
         sSum.alreadyImported = alreadyCount;
         sSum.missingImages = missingCount;
 
-        const ready = bundles.filter((b) => !already.has(b.manifestName)
-          && b.images.length > 0 && b.images.every((i) => !i.missing));
+        const ready = bundles.filter((b) => {
+          if (already.has(b.manifestName)) return false;
+          if (b.images.length === 0 || b.images.some((i) => i.missing)) return false;
+          const platforms = b.platforms.length ? b.platforms : (Array.isArray(sched.target_platforms) && sched.target_platforms.length ? sched.target_platforms : ['x', 'linkedin', 'facebook']);
+          return platforms.some((p) => String(b.texts[p] || '').trim());
+        });
         sSum.ready = ready.length;
         const perRun = Math.max(1, Number(sched.posts_per_run) || 1);
         const pick = ready.slice(0, perRun);
@@ -2763,14 +2767,18 @@ async function processSocialFolderSchedules(opts = {}) {
         const newlyImported = [];
         for (const bundle of pick) {
           try {
-            const paths = await uploadBundleImagesToStorage(bundle);
             const platforms = bundle.platforms.length ? bundle.platforms : requestedPlatforms;
             const variants = {};
             for (const p of platforms) if (bundle.texts[p]) variants[p] = { description: bundle.texts[p], hashtags: [] };
             const description = bundle.texts[platforms[0]] || bundle.texts.x || bundle.texts.linkedin || '';
+            if (!String(description || '').trim()) {
+              throw new Error('No post text found in manifest; refusing to queue media-only post. Use the same text sections accepted by manual Post Now.');
+            }
+
+            const paths = await uploadBundleImagesToStorage(bundle);
 
             const sourceFiles = [bundle.manifestName, ...bundle.images.filter((i) => !i.missing).map((i) => i.name)];
-            await supabase.from('social_posts').insert({
+            const { data: postRow, error: postError } = await supabase.from('social_posts').insert({
               description,
               image_path: paths[0] || null,
               image_paths: paths,
@@ -2781,12 +2789,21 @@ async function processSocialFolderSchedules(opts = {}) {
               status: 'pending',
               scheduled_at: null,
               source_meta: { folder: folderPath, files: sourceFiles },
-            });
+            }).select('id').single();
+            if (postError || !postRow?.id) throw new Error(postError?.message || 'Failed to create social post row');
+            try { saveJobAccountSelections(postRow.id, accountSelections); } catch {}
             newlyImported.push(bundle.manifestName);
             sSum.queuedFiles.push(bundle.manifestName);
             sSum.queued += 1;
             summary.queued += 1;
             console.log(`[FolderSched] Queued post from ${bundle.manifestName}`);
+
+            if (force) {
+              await processSocialPost(supabase, postRow.id, async (msg) => {
+                const settings = await getSettings().catch(() => null);
+                if (settings) await notifyTelegram(settings, msg);
+              });
+            }
           } catch (e) {
             console.error(`[FolderSched] Failed to queue ${bundle.manifestName}:`, e.message);
             summary.errors.push(`${bundle.manifestName}: ${e.message}`);
