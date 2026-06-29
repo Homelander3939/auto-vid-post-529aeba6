@@ -7,19 +7,62 @@ const { launchPersistent, safeClose } = require('./social-post-base');
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
-const X_MAX_CHARS = 280;
-const X_SAFE_CHARS = 245;
+const X_MAX_CHARS = 280; // hard cap on the X free tier
+const X_SAFE_CHARS = 275; // tiny buffer for invisible whitespace
+const X_URL_WEIGHT = 23;  // t.co always wraps URLs to ~23 chars
 
 function xLength(value) {
   return Array.from(String(value || '').replace(/\r\n/g, '\n')).length;
 }
 
+// X counts every URL as 23 chars regardless of real length.
+function xWeightedLength(value) {
+  const s = String(value || '').replace(/\r\n/g, '\n');
+  const urls = s.match(/https?:\/\/\S+/g) || [];
+  const stripped = s.replace(/https?:\/\/\S+/g, '');
+  return Array.from(stripped).length + urls.length * X_URL_WEIGHT;
+}
+
+// URL-aware trim. Preserves the first URL, strips trailing hashtags first,
+// then drops all hashtags, then truncates remaining body words. Always fits
+// within X's 280-char weighted limit.
 function trimToXLimit(value, limit = X_SAFE_CHARS) {
-  const chars = Array.from(String(value || '').trim());
-  if (chars.length <= limit) return chars.join('');
-  const hard = chars.slice(0, Math.max(0, limit - 1)).join('');
-  const soft = hard.replace(/\s+\S{0,24}$/, '').trim();
-  return `${(soft.length >= 80 ? soft : hard).trim()}…`;
+  let s = String(value || '').trim();
+  if (xWeightedLength(s) <= limit) return s;
+
+  const urlRe = /https?:\/\/\S+/g;
+  const urls = s.match(urlRe) || [];
+  if (urls.length > 1) {
+    const first = urls[0];
+    let seen = false;
+    s = s.replace(urlRe, (u) => {
+      if (u === first && !seen) { seen = true; return u; }
+      return '';
+    }).replace(/[ \t]{2,}/g, ' ').trim();
+  }
+  if (xWeightedLength(s) <= limit) return s;
+
+  while (xWeightedLength(s) > limit) {
+    const next = s.replace(/\s*#[\p{L}0-9_]+(?=[\s]*$)/u, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  if (xWeightedLength(s) <= limit) return s;
+
+  s = s.replace(/\s*#[\p{L}0-9_]+/gu, '').replace(/[ \t]{2,}/g, ' ').trim();
+  if (xWeightedLength(s) <= limit) return s;
+
+  const firstUrl = (s.match(urlRe) || [])[0] || '';
+  let body = firstUrl ? s.replace(firstUrl, '').trim() : s;
+  const tail = firstUrl ? `\n${firstUrl}` : '';
+  while (xWeightedLength((body + tail).trim()) > limit && body.length > 0) {
+    const cut = body.replace(/\s*\S+\s*$/, '').trim();
+    body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
+  }
+  if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
+  let result = (body + tail).trim();
+  if (xWeightedLength(result) > limit) result = Array.from(result).slice(0, limit).join('');
+  return result;
 }
 
 function formatXHashtags(hashtags = []) {
