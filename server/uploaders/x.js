@@ -205,7 +205,7 @@ async function ensureXTextWithinLimit(page, textArea, desiredText) {
   let safeText = trimToXLimit(desiredText, X_SAFE_CHARS);
   for (let attempt = 0; attempt < 4; attempt++) {
     const text = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
-    if (xLength(text) <= X_MAX_CHARS && text) return safeText;
+    if (xWeightedLength(text) <= X_MAX_CHARS && text) return safeText;
     safeText = trimToXLimit(safeText, Math.max(40, Math.min(X_SAFE_CHARS, xLength(safeText)) - 32));
     await insertXText(page, textArea, safeText);
     await page.waitForTimeout(500);
