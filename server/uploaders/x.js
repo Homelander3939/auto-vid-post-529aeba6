@@ -103,11 +103,24 @@ async function getMyHandle(page) {
   return handleFromAvatar;
 }
 
+async function clearXComposer(page, textArea) {
+  // X /compose/post may auto-restore a prior unsent draft (especially after a
+  // failed scheduled run). A simple Ctrl+A+Backspace clears the visible text
+  // but X's React state can still mark the textbox as "over limit" because the
+  // restored draft was over limit. Explicitly discard the draft when X offers
+  // to, then fall back to selecting-all + Backspace until empty.
+  await textArea.click().catch(() => {});
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+    await page.keyboard.press('Backspace').catch(() => {});
+    await page.waitForTimeout(150);
+    const current = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+    if (!current) return;
+  }
+}
+
 async function insertXText(page, textArea, text) {
-  await textArea.click();
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-  await page.keyboard.press('Backspace').catch(() => {});
-  await page.waitForTimeout(250);
+  await clearXComposer(page, textArea);
 
   // X is React-controlled. CDP keyboard insertion can make text appear while
   // React's composer state remains empty, so the media-only Post button becomes
@@ -143,24 +156,16 @@ async function insertXText(page, textArea, text) {
 }
 
 async function ensureXTextWithinLimit(page, textArea, desiredText) {
+  // Trust ONLY the actual textbox length. Page-level toasts ("Upgrade to
+  // Premium to write longer posts", lingering "exceeded the character limit"
+  // banners from a restored draft, drafts side-panel previews, etc.) live
+  // outside the textbox and previously caused this loop to falsely abort,
+  // which is why scheduled X uploads kept failing while manual posts worked.
   let safeText = trimToXLimit(desiredText, X_SAFE_CHARS);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const state = await page.evaluate(() => {
-      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
-      const text = (el?.innerText || el?.textContent || '').trim();
-      const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
-        .map((n) => (n.innerText || n.textContent || '').trim())
-        .filter(Boolean)
-        .join(' | ')
-        .slice(0, 500);
-      return { text, problem };
-    }).catch(() => ({ text: '', problem: '' }));
-    const over = String(state.problem || '').match(/exceeded the character limit by\s+(\d+)/i);
-    if (xLength(state.text) <= X_MAX_CHARS && !over && !/upgrade to premium to write longer posts|character limit/i.test(state.problem || '')) {
-      return safeText;
-    }
-    const reduceBy = over ? Number(over[1]) + 8 : Math.max(8, xLength(state.text) - X_SAFE_CHARS + 8);
-    safeText = trimToXLimit(safeText, Math.max(40, xLength(safeText) - reduceBy));
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const text = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+    if (xLength(text) <= X_MAX_CHARS && text) return safeText;
+    safeText = trimToXLimit(safeText, Math.max(40, Math.min(X_SAFE_CHARS, xLength(safeText)) - 32));
     await insertXText(page, textArea, safeText);
     await page.waitForTimeout(500);
   }
@@ -273,8 +278,8 @@ async function getXMediaState(page) {
       '[aria-label*="Processing" i]',
       '[data-testid*="progress" i]',
     ].join(','))).some(visible);
-    const text = (composer.innerText || composer.textContent || '').slice(0, 1000);
-    const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+    const text = (textbox?.innerText || textbox?.textContent || '').slice(0, 400);
+    const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"]'))
       .map((n) => (n.innerText || n.textContent || '').trim())
       .filter(Boolean)
       .join(' | ')
