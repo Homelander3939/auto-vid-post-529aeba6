@@ -659,7 +659,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     await textArea.waitFor({ state: 'visible', timeout: 30000 });
 
     const fullText = buildXPostText(description || '', hashtags);
-    if (xLength(fullText) > X_MAX_CHARS) {
+    if (xWeightedLength(fullText) > X_MAX_CHARS) {
       throw new Error('X text could not be shortened under the 280 character limit. Leaving source files for retry.');
     }
 
