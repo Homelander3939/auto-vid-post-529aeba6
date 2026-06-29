@@ -7,19 +7,62 @@ const { launchPersistent, safeClose } = require('./social-post-base');
 
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
-const X_MAX_CHARS = 280;
-const X_SAFE_CHARS = 245;
+const X_MAX_CHARS = 280; // hard cap on the X free tier
+const X_SAFE_CHARS = 275; // tiny buffer for invisible whitespace
+const X_URL_WEIGHT = 23;  // t.co always wraps URLs to ~23 chars
 
 function xLength(value) {
   return Array.from(String(value || '').replace(/\r\n/g, '\n')).length;
 }
 
+// X counts every URL as 23 chars regardless of real length.
+function xWeightedLength(value) {
+  const s = String(value || '').replace(/\r\n/g, '\n');
+  const urls = s.match(/https?:\/\/\S+/g) || [];
+  const stripped = s.replace(/https?:\/\/\S+/g, '');
+  return Array.from(stripped).length + urls.length * X_URL_WEIGHT;
+}
+
+// URL-aware trim. Preserves the first URL, strips trailing hashtags first,
+// then drops all hashtags, then truncates remaining body words. Always fits
+// within X's 280-char weighted limit.
 function trimToXLimit(value, limit = X_SAFE_CHARS) {
-  const chars = Array.from(String(value || '').trim());
-  if (chars.length <= limit) return chars.join('');
-  const hard = chars.slice(0, Math.max(0, limit - 1)).join('');
-  const soft = hard.replace(/\s+\S{0,24}$/, '').trim();
-  return `${(soft.length >= 80 ? soft : hard).trim()}…`;
+  let s = String(value || '').trim();
+  if (xWeightedLength(s) <= limit) return s;
+
+  const urlRe = /https?:\/\/\S+/g;
+  const urls = s.match(urlRe) || [];
+  if (urls.length > 1) {
+    const first = urls[0];
+    let seen = false;
+    s = s.replace(urlRe, (u) => {
+      if (u === first && !seen) { seen = true; return u; }
+      return '';
+    }).replace(/[ \t]{2,}/g, ' ').trim();
+  }
+  if (xWeightedLength(s) <= limit) return s;
+
+  while (xWeightedLength(s) > limit) {
+    const next = s.replace(/\s*#[\p{L}0-9_]+(?=[\s]*$)/u, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  if (xWeightedLength(s) <= limit) return s;
+
+  s = s.replace(/\s*#[\p{L}0-9_]+/gu, '').replace(/[ \t]{2,}/g, ' ').trim();
+  if (xWeightedLength(s) <= limit) return s;
+
+  const firstUrl = (s.match(urlRe) || [])[0] || '';
+  let body = firstUrl ? s.replace(firstUrl, '').trim() : s;
+  const tail = firstUrl ? `\n${firstUrl}` : '';
+  while (xWeightedLength((body + tail).trim()) > limit && body.length > 0) {
+    const cut = body.replace(/\s*\S+\s*$/, '').trim();
+    body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
+  }
+  if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
+  let result = (body + tail).trim();
+  if (xWeightedLength(result) > limit) result = Array.from(result).slice(0, limit).join('');
+  return result;
 }
 
 function formatXHashtags(hashtags = []) {
@@ -35,24 +78,22 @@ function formatXHashtags(hashtags = []) {
 }
 
 function buildXPostText(description, hashtags = []) {
-  const desc = String(description || '').replace(/\s+/g, ' ').trim();
+  // Preserve user newlines (paragraph breaks, URL-on-own-line) but collapse
+  // duplicate spaces. We deliberately do NOT collapse \n -> space anymore.
+  const desc = String(description || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   const tags = formatXHashtags(hashtags);
-  const fittingTags = [];
+  if (!tags.length) return trimToXLimit(desc, X_SAFE_CHARS);
+
+  // Add only tags that still fit alongside the description (weighted length).
+  let combined = desc;
   for (const tag of tags) {
-    const candidateTags = fittingTags.concat(tag).join(' ');
-    if (xLength(candidateTags) <= 80) fittingTags.push(tag);
+    const candidate = combined ? `${combined} ${tag}` : tag;
+    if (xWeightedLength(candidate) <= X_SAFE_CHARS) combined = candidate;
+    else break;
   }
-  let tagLine = fittingTags.join(' ');
-  while (tagLine && xLength(tagLine) > X_SAFE_CHARS) {
-    fittingTags.pop();
-    tagLine = fittingTags.join(' ');
-  }
-  if (!desc) return trimToXLimit(tagLine, X_SAFE_CHARS);
-  const separator = tagLine ? '\n\n' : '';
-  const descLimit = X_SAFE_CHARS - xLength(separator) - xLength(tagLine);
-  const safeDesc = trimToXLimit(desc, Math.max(40, descLimit));
-  return trimToXLimit(`${safeDesc}${separator}${tagLine}`.trim(), X_SAFE_CHARS);
+  return trimToXLimit(combined, X_SAFE_CHARS);
 }
+
 
 function handleFromXUrl(raw) {
   if (!raw) return null;
@@ -164,7 +205,7 @@ async function ensureXTextWithinLimit(page, textArea, desiredText) {
   let safeText = trimToXLimit(desiredText, X_SAFE_CHARS);
   for (let attempt = 0; attempt < 4; attempt++) {
     const text = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
-    if (xLength(text) <= X_MAX_CHARS && text) return safeText;
+    if (xWeightedLength(text) <= X_MAX_CHARS && text) return safeText;
     safeText = trimToXLimit(safeText, Math.max(40, Math.min(X_SAFE_CHARS, xLength(safeText)) - 32));
     await insertXText(page, textArea, safeText);
     await page.waitForTimeout(500);
@@ -618,7 +659,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     await textArea.waitFor({ state: 'visible', timeout: 30000 });
 
     const fullText = buildXPostText(description || '', hashtags);
-    if (xLength(fullText) > X_MAX_CHARS) {
+    if (xWeightedLength(fullText) > X_MAX_CHARS) {
       throw new Error('X text could not be shortened under the 280 character limit. Leaving source files for retry.');
     }
 
