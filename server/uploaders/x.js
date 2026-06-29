@@ -78,24 +78,22 @@ function formatXHashtags(hashtags = []) {
 }
 
 function buildXPostText(description, hashtags = []) {
-  const desc = String(description || '').replace(/\s+/g, ' ').trim();
+  // Preserve user newlines (paragraph breaks, URL-on-own-line) but collapse
+  // duplicate spaces. We deliberately do NOT collapse \n -> space anymore.
+  const desc = String(description || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   const tags = formatXHashtags(hashtags);
-  const fittingTags = [];
+  if (!tags.length) return trimToXLimit(desc, X_SAFE_CHARS);
+
+  // Add only tags that still fit alongside the description (weighted length).
+  let combined = desc;
   for (const tag of tags) {
-    const candidateTags = fittingTags.concat(tag).join(' ');
-    if (xLength(candidateTags) <= 80) fittingTags.push(tag);
+    const candidate = combined ? `${combined} ${tag}` : tag;
+    if (xWeightedLength(candidate) <= X_SAFE_CHARS) combined = candidate;
+    else break;
   }
-  let tagLine = fittingTags.join(' ');
-  while (tagLine && xLength(tagLine) > X_SAFE_CHARS) {
-    fittingTags.pop();
-    tagLine = fittingTags.join(' ');
-  }
-  if (!desc) return trimToXLimit(tagLine, X_SAFE_CHARS);
-  const separator = tagLine ? '\n\n' : '';
-  const descLimit = X_SAFE_CHARS - xLength(separator) - xLength(tagLine);
-  const safeDesc = trimToXLimit(desc, Math.max(40, descLimit));
-  return trimToXLimit(`${safeDesc}${separator}${tagLine}`.trim(), X_SAFE_CHARS);
+  return trimToXLimit(combined, X_SAFE_CHARS);
 }
+
 
 function handleFromXUrl(raw) {
   if (!raw) return null;
