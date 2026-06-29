@@ -278,8 +278,8 @@ async function getXMediaState(page) {
       '[aria-label*="Processing" i]',
       '[data-testid*="progress" i]',
     ].join(','))).some(visible);
-    const text = (composer.innerText || composer.textContent || '').slice(0, 1000);
-    const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"], [aria-live="polite"]'))
+    const text = (textbox?.innerText || textbox?.textContent || '').slice(0, 400);
+    const problem = Array.from(document.querySelectorAll('[data-testid="toast"], div[role="alert"], [aria-live="assertive"]'))
       .map((n) => (n.innerText || n.textContent || '').trim())
       .filter(Boolean)
       .join(' | ')
