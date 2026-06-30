@@ -425,7 +425,7 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
 
 async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
   const expected = String(expectedText || '').trim();
-  const expectedNeedle = expected.replace(/\s+/g, ' ').slice(0, Math.min(80, expected.length));
+  const expectedNeedle = normalizeForXMatch(expected).slice(0, Math.min(70, normalizeForXMatch(expected).length));
   const deadline = Date.now() + timeout;
   let last = '';
   while (Date.now() < deadline) {
@@ -446,7 +446,7 @@ async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
       return { text, enabledButton };
     }).catch(() => ({ text: '', enabledButton: false }));
     last = state.text || '';
-    const normalized = last.replace(/\s+/g, ' ');
+    const normalized = normalizeForXMatch(last);
     if (state.enabledButton && last && (!expectedNeedle || normalized.includes(expectedNeedle))) return true;
     await page.waitForTimeout(500);
   }
@@ -674,7 +674,7 @@ async function resolvePostedXUrl(page, handle, snippet, baselineUrls = []) {
 }
 
 async function verifyPostedXUrlContainsText(page, url, expectedText) {
-  const expected = String(expectedText || '').trim().replace(/\s+/g, ' ');
+  const expected = normalizeForXMatch(expectedText);
   if (!expected || !url) return true;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(2500);
@@ -682,8 +682,9 @@ async function verifyPostedXUrlContainsText(page, url, expectedText) {
     const article = document.querySelector('article');
     return (article?.innerText || article?.textContent || '').trim().replace(/\s+/g, ' ');
   }).catch(() => '');
-  const needle = expected.slice(0, Math.min(45, expected.length));
-  if (needle && !articleText.includes(needle)) {
+  const articleNorm = normalizeForXMatch(articleText);
+  const needle = expected.slice(0, Math.min(35, expected.length));
+  if (needle && !articleNorm.includes(needle)) {
     throw new Error('X published URL did not contain the intended text, so it is not treated as a successful post. Leaving source files for retry.');
   }
   return true;
