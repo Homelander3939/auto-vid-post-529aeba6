@@ -8,7 +8,7 @@ const { launchPersistent, safeClose } = require('./social-post-base');
 const X_COMPOSE_URL = 'https://x.com/compose/post';
 const X_MAX_IMAGES = 4;
 const X_MAX_CHARS = 280; // hard cap on the X free tier
-const X_SAFE_CHARS = 275; // tiny buffer for invisible whitespace
+const X_SAFE_CHARS = 260; // buffer for hidden unicode/url counting in X UI
 const X_URL_WEIGHT = 23;  // t.co always wraps URLs to ~23 chars
 
 function xLength(value) {
@@ -23,9 +23,63 @@ function xWeightedLength(value) {
   return Array.from(stripped).length + urls.length * X_URL_WEIGHT;
 }
 
-// URL-aware trim. Preserves the first URL, strips trailing hashtags first,
-// then drops all hashtags, then truncates remaining body words. Always fits
-// within X's 280-char weighted limit.
+function normalizeForXMatch(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function uniqueUrls(value) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of String(value || '').match(/https?:\/\/\S+/g) || []) {
+    const url = raw.replace(/[),.;!?]+$/g, '');
+    const key = url.toLowerCase();
+    if (!url || seen.has(key)) continue;
+    seen.add(key);
+    out.push(url);
+  }
+  return out;
+}
+
+function stripXNoise(value) {
+  return String(value || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:\n]{2,40}\s*:\s*/i, '')
+    .replace(/^\s*(?:x|twitter)(?:_post| post)?\s*:\s*/i, '')
+    .replace(/^\s*\d+\s*\/\s*\d+\s*/gm, '')
+    .replace(/\b(?:LINKEDIN|FACEBOOK|X)_(?:POST|THREAD_OR_LONG_POST)\b/gi, '')
+    .trim();
+}
+
+function firstXStory(value) {
+  let s = stripXNoise(value)
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // Automatic folder manifests can contain a whole digest/thread in one field.
+  // For free X accounts publish one concise story, not the full multi-story text.
+  const splitters = [
+    /\s*;\s*(?=\d+\.\s*[^:]{2,45}:)/,
+    /\n\s*(?=\d+\.\s*[^:]{2,45}:)/,
+    /\n\s*(?=\d+\s*\/\s*\d+)/,
+    /\n\s*-{3,}\s*\n/,
+  ];
+  for (const re of splitters) {
+    const parts = s.split(re).map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1 && parts[0].length >= 35) { s = parts[0]; break; }
+  }
+  return stripXNoise(s);
+}
+
+// URL-aware trim. Preserves the first URL, strips hashtags first, then truncates
+// body words. Always fits within the safe X free-tier limit.
 function trimToXLimit(value, limit = X_SAFE_CHARS) {
   let s = String(value || '').trim();
   if (xWeightedLength(s) <= limit) return s;
@@ -42,26 +96,24 @@ function trimToXLimit(value, limit = X_SAFE_CHARS) {
   }
   if (xWeightedLength(s) <= limit) return s;
 
-  while (xWeightedLength(s) > limit) {
-    const next = s.replace(/\s*#[\p{L}0-9_]+(?=[\s]*$)/u, '').trim();
-    if (next === s) break;
-    s = next;
-  }
-  if (xWeightedLength(s) <= limit) return s;
-
   s = s.replace(/\s*#[\p{L}0-9_]+/gu, '').replace(/[ \t]{2,}/g, ' ').trim();
   if (xWeightedLength(s) <= limit) return s;
 
   const firstUrl = (s.match(urlRe) || [])[0] || '';
   let body = firstUrl ? s.replace(firstUrl, '').trim() : s;
   const tail = firstUrl ? `\n${firstUrl}` : '';
-  while (xWeightedLength((body + tail).trim()) > limit && body.length > 0) {
+  while (xWeightedLength((body + tail).trim()) + 1 > limit && body.length > 0) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
     body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
   }
   if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
   let result = (body + tail).trim();
-  if (xWeightedLength(result) > limit) result = Array.from(result).slice(0, limit).join('');
+  while (xWeightedLength(result) > limit && body.length > 0) {
+    body = body.replace(/\s*\S+\s*$/, '').trim();
+    if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
+    result = (body + tail).trim();
+  }
+  if (xWeightedLength(result) > limit) result = Array.from(result).slice(0, limit).join('').trim();
   return result;
 }
 
@@ -78,22 +130,35 @@ function formatXHashtags(hashtags = []) {
 }
 
 function buildXPostText(description, hashtags = []) {
-  // Preserve user newlines (paragraph breaks, URL-on-own-line) but collapse
-  // duplicate spaces. We deliberately do NOT collapse \n -> space anymore.
-  const desc = String(description || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-  const tags = formatXHashtags(hashtags);
-  if (!tags.length) return trimToXLimit(desc, X_SAFE_CHARS);
+  const raw = String(description || '').replace(/\r\n/g, '\n');
+  const firstUrl = uniqueUrls(raw)[0] || '';
 
-  // Add only tags that still fit alongside the description (weighted length).
-  let combined = desc;
-  for (const tag of tags) {
-    const candidate = combined ? `${combined} ${tag}` : tag;
-    if (xWeightedLength(candidate) <= X_SAFE_CHARS) combined = candidate;
-    else break;
+  let body = firstXStory(raw)
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // X automatic campaign posts get max one hashtag. Keep the link, remove tag
+  // stuffing, then trim the body. Manual posts go through this same uploader too.
+  const inlineTags = formatXHashtags(raw.match(/#[\p{L}\p{N}_]+/gu) || []);
+  const tags = [...inlineTags, ...formatXHashtags(hashtags)].filter((tag, idx, arr) =>
+    arr.findIndex((x) => x.toLowerCase() === tag.toLowerCase()) === idx,
+  ).slice(0, 1);
+
+  let tail = [tags[0], firstUrl].filter(Boolean).join('\n');
+  tail = tail ? `\n\n${tail}` : '';
+  if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
+
+  while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_CHARS) {
+    const cut = body.replace(/\s*\S+\s*$/, '').trim();
+    body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
   }
-  return trimToXLimit(combined, X_SAFE_CHARS);
+  if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
+  const candidate = `${body}${tail}`.trim() || firstUrl;
+  return trimToXLimit(candidate, X_SAFE_CHARS);
 }
-
 
 function handleFromXUrl(raw) {
   if (!raw) return null;
@@ -360,7 +425,7 @@ async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
 
 async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
   const expected = String(expectedText || '').trim();
-  const expectedNeedle = expected.replace(/\s+/g, ' ').slice(0, Math.min(80, expected.length));
+  const expectedNeedle = normalizeForXMatch(expected).slice(0, Math.min(70, normalizeForXMatch(expected).length));
   const deadline = Date.now() + timeout;
   let last = '';
   while (Date.now() < deadline) {
@@ -381,7 +446,7 @@ async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
       return { text, enabledButton };
     }).catch(() => ({ text: '', enabledButton: false }));
     last = state.text || '';
-    const normalized = last.replace(/\s+/g, ' ');
+    const normalized = normalizeForXMatch(last);
     if (state.enabledButton && last && (!expectedNeedle || normalized.includes(expectedNeedle))) return true;
     await page.waitForTimeout(500);
   }
@@ -609,7 +674,7 @@ async function resolvePostedXUrl(page, handle, snippet, baselineUrls = []) {
 }
 
 async function verifyPostedXUrlContainsText(page, url, expectedText) {
-  const expected = String(expectedText || '').trim().replace(/\s+/g, ' ');
+  const expected = normalizeForXMatch(expectedText);
   if (!expected || !url) return true;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(2500);
@@ -617,8 +682,9 @@ async function verifyPostedXUrlContainsText(page, url, expectedText) {
     const article = document.querySelector('article');
     return (article?.innerText || article?.textContent || '').trim().replace(/\s+/g, ' ');
   }).catch(() => '');
-  const needle = expected.slice(0, Math.min(45, expected.length));
-  if (needle && !articleText.includes(needle)) {
+  const articleNorm = normalizeForXMatch(articleText);
+  const needle = expected.slice(0, Math.min(35, expected.length));
+  if (needle && !articleNorm.includes(needle)) {
     throw new Error('X published URL did not contain the intended text, so it is not treated as a successful post. Leaving source files for retry.');
   }
   return true;
@@ -693,13 +759,13 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       // it. Refuse to click Post on an empty textbox — that's how we ended up
       // posting media-only tweets previously.
       const currentText = await readComposerText();
-      const currentNeedle = postedText.replace(/\s+/g, ' ').slice(0, Math.min(80, postedText.length));
-      if (!currentText || (currentNeedle && !currentText.replace(/\s+/g, ' ').includes(currentNeedle))) {
+      const currentNeedle = normalizeForXMatch(postedText).slice(0, Math.min(70, normalizeForXMatch(postedText).length));
+      if (!currentText || (currentNeedle && !normalizeForXMatch(currentText).includes(currentNeedle))) {
         await textArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
         await insertXText(page, textArea, postedText);
         await page.waitForTimeout(800);
         const recheck = await readComposerText();
-        if (!recheck || (currentNeedle && !recheck.replace(/\s+/g, ' ').includes(currentNeedle))) {
+        if (!recheck || (currentNeedle && !normalizeForXMatch(recheck).includes(currentNeedle))) {
           throw new Error('X composer lost or changed its text before posting and could not be refilled. Leaving source files for retry.');
         }
       }

@@ -1945,59 +1945,83 @@ function stripTechPulsePrefix(text) {
 
 // Hard X (Twitter) free-tier post limit. URLs count as 23 chars (t.co wrap).
 const X_HARD_LIMIT = 280;
+const X_SAFE_LIMIT = 260;
 const X_URL_WEIGHT = 23;
 
 function xWeightedLength(text) {
-  const s = String(text || '');
+  const s = String(text || '').replace(/\r\n/g, '\n');
   const urlRe = /https?:\/\/\S+/g;
   const urls = s.match(urlRe) || [];
-  const withoutUrls = s.replace(urlRe, '');
-  return [...withoutUrls].length + urls.length * X_URL_WEIGHT;
+  return [...s.replace(urlRe, '')].length + urls.length * X_URL_WEIGHT;
 }
 
-// Fit text to X's 280-char limit. Strategy: keep the FIRST link (most important),
-// strip hashtags progressively from the end, then trim body words until it fits.
+function firstUrlFromText(text) {
+  const m = String(text || '').match(/https?:\/\/\S+/);
+  return m ? m[0].replace(/[),.;!?]+$/g, '') : '';
+}
+
+function firstXStory(text) {
+  let s = stripTechPulsePrefix(String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^\s*(?:x|twitter)(?:_post| post)?\s*:\s*/i, '')
+    .replace(/^\s*\d+\s*\/\s*\d+\s*/gm, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim());
+  const splitters = [
+    /\s*;\s*(?=\d+\.\s*[^:]{2,45}:)/,
+    /\n\s*(?=\d+\.\s*[^:]{2,45}:)/,
+    /\n\s*(?=\d+\s*\/\s*\d+)/,
+    /\n\s*-{3,}\s*\n/,
+  ];
+  for (const re of splitters) {
+    const parts = s.split(re).map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1 && parts[0].length >= 35) { s = parts[0]; break; }
+  }
+  return stripTechPulsePrefix(s);
+}
+
+function cleanXHashtags(text) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of String(text || '').match(/#[\p{L}\p{N}_]+/gu) || []) {
+    const tag = raw.replace(/[^#\p{L}\p{N}_]/gu, '');
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+  }
+  return out.slice(0, 1);
+}
+
+// Fit text to X free-tier. Keep the first link, keep at most one hashtag, and
+// use only the first story from a multi-story digest/thread.
 function fitForX(text) {
-  let s = String(text || '').trim();
-  if (xWeightedLength(s) <= X_HARD_LIMIT) return s;
+  const raw = String(text || '').trim();
+  const firstUrl = firstUrlFromText(raw);
+  const tag = cleanXHashtags(raw)[0] || '';
+  let body = firstXStory(raw)
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 
-  // Preserve the first URL, drop additional duplicate URLs.
-  const urlRe = /https?:\/\/\S+/g;
-  const urls = s.match(urlRe) || [];
-  if (urls.length > 1) {
-    const firstUrl = urls[0];
-    let seen = false;
-    s = s.replace(urlRe, (u) => {
-      if (u === firstUrl && !seen) { seen = true; return u; }
-      return '';
-    }).replace(/[ \t]{2,}/g, ' ').trim();
-  }
-  if (xWeightedLength(s) <= X_HARD_LIMIT) return s.replace(/\s+\n/g, '\n').trim();
+  let tail = [tag, firstUrl].filter(Boolean).join('\n');
+  tail = tail ? `\n\n${tail}` : '';
+  if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
 
-  // Drop hashtags one-by-one from the end.
-  while (xWeightedLength(s) > X_HARD_LIMIT) {
-    const newS = s.replace(/\s*#[\p{L}0-9_]+(?=\s*$)/u, '').trim();
-    if (newS === s) break;
-    s = newS;
-  }
-  if (xWeightedLength(s) <= X_HARD_LIMIT) return s;
-
-  // Drop ALL remaining hashtags if still over.
-  s = s.replace(/\s*#[\p{L}0-9_]+/gu, '').replace(/[ \t]{2,}/g, ' ').trim();
-  if (xWeightedLength(s) <= X_HARD_LIMIT) return s;
-
-  // Trim body words from end, keeping the first URL intact.
-  const firstUrl = (s.match(urlRe) || [])[0] || '';
-  let body = firstUrl ? s.replace(firstUrl, '').trim() : s;
-  const tail = firstUrl ? `\n${firstUrl}` : '';
-  while (xWeightedLength((body + tail).trim()) > X_HARD_LIMIT && body.length > 0) {
+  while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_LIMIT) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
-    if (cut === body) { body = body.slice(0, Math.max(0, body.length - 1)); } else { body = cut; }
+    body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
   }
-  // Add ellipsis if we truncated.
   if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
-  const result = (body + tail).trim();
-  return xWeightedLength(result) <= X_HARD_LIMIT ? result : result.slice(0, X_HARD_LIMIT);
+  let result = `${body}${tail}`.trim() || firstUrl;
+  while (xWeightedLength(result) > X_SAFE_LIMIT && body) {
+    body = body.replace(/\s*\S+\s*$/, '').trim();
+    if (body && !/[.!?…]$/.test(body)) body = body.replace(/[,;:\-\s]+$/, '') + '…';
+    result = `${body}${tail}`.trim();
+  }
+  return xWeightedLength(result) <= X_HARD_LIMIT ? result : [...result].slice(0, X_SAFE_LIMIT).join('').trim();
 }
 
 function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, fallbackXBody, platforms) {
@@ -2023,7 +2047,10 @@ function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, 
   const hasExplicitFb = !!(fbPost || liFb);
 
   for (const p of platforms) {
-    if (p === 'x' && xFinal) out.x = fitForX((xFinal + (hasExplicitX ? '' : links)).trim());
+    if (p === 'x' && xFinal) {
+      const xWithLink = /https?:\/\/\S+/i.test(xFinal) ? xFinal : `${xFinal}${links}`;
+      out.x = fitForX(xWithLink.trim());
+    }
     else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
     else if (p === 'facebook' && fbFinal) out.facebook = (fbFinal + (hasExplicitFb ? '' : links)).trim();
   }
