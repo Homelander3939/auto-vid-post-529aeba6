@@ -2047,7 +2047,10 @@ function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, 
   const hasExplicitFb = !!(fbPost || liFb);
 
   for (const p of platforms) {
-    if (p === 'x' && xFinal) out.x = fitForX((xFinal + (hasExplicitX ? '' : links)).trim());
+    if (p === 'x' && xFinal) {
+      const xWithLink = /https?:\/\/\S+/i.test(xFinal) ? xFinal : `${xFinal}${links}`;
+      out.x = fitForX(xWithLink.trim());
+    }
     else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
     else if (p === 'facebook' && fbFinal) out.facebook = (fbFinal + (hasExplicitFb ? '' : links)).trim();
   }
