@@ -1236,6 +1236,7 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
 
     for (let clickAttempt = 0; clickAttempt < 3 && !publishTriggered; clickAttempt++) {
       await dismissExitDialog(page);
+      const preClickBtn = await capturePostButtonState();
       postClicked = await clickPostOnce();
 
       if (!postClicked) {
@@ -1264,12 +1265,14 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         await page.waitForTimeout(1500);
       }
 
-      await page.waitForTimeout(2500);
-      publishTriggered = await hasPublishStarted();
+      // Poll for up to ~10s so we catch a delayed "posting…" transition or the button
+      // disappearing after a slow network round-trip.
+      for (let poll = 0; poll < 5 && !publishTriggered; poll++) {
+        await page.waitForTimeout(2000);
+        publishTriggered = await hasPublishStarted(preClickBtn);
+      }
       if (!publishTriggered) {
         console.warn(`[TikTok] Post click attempt ${clickAttempt + 1} did not trigger publish flow; retrying`);
-        // After a failed attempt, a TikTok tip / "what's new" / promo overlay
-        // may be intercepting clicks. Try to dismiss it before the next retry.
         if (clickAttempt >= 1) {
           await dismissOverlayBlockingFlow(page, { logPrefix: '[TikTok]' });
         }
@@ -1277,7 +1280,6 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
     }
 
     if (!publishTriggered && postClicked) {
-      // One extra targeted attempt for the "Post now" confirmation modal before escalating.
       const approvedContinueDialog = await acceptContinueToPostDialog(page);
       if (approvedContinueDialog) {
         await page.waitForTimeout(2000);
