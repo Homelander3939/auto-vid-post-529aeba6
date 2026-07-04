@@ -1094,7 +1094,34 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
       console.warn('[TikTok] Pre-post vision check failed (non-fatal):', e.message);
     }
 
-    const hasPublishStarted = async () => {
+    // Snapshot the Post button state before clicking so we can detect that our click
+    // actually registered even when TikTok doesn't yet show a "posting" text signal —
+    // the button disappears, becomes disabled, or the whole upload form unmounts.
+    const capturePostButtonState = async () => {
+      return page.evaluate(() => {
+        const isVisible = (el) => {
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        };
+        const direct = document.querySelector('button[data-e2e="post-button"]');
+        const candidates = [];
+        if (direct) candidates.push(direct);
+        document.querySelectorAll('button, div[role="button"]').forEach((btn) => {
+          const txt = (btn.textContent || '').trim().toLowerCase();
+          if (txt === 'post' || txt === 'publish') candidates.push(btn);
+        });
+        const target = candidates.find(isVisible) || candidates[0] || null;
+        if (!target) return { present: false, enabled: false };
+        const enabled = !target.disabled &&
+          target.getAttribute('aria-disabled') !== 'true' &&
+          !target.classList.toString().toLowerCase().includes('disabled');
+        return { present: isVisible(target), enabled };
+      }).catch(() => ({ present: false, enabled: false }));
+    };
+
+    const hasPublishStarted = async (prevBtn) => {
       const state = await page.evaluate(() => {
         const text = (document.body?.innerText || '').toLowerCase();
         const url = window.location.href;
@@ -1103,14 +1130,33 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
           text.includes('publishing') ||
           text.includes('your video is being uploaded to tiktok') ||
           text.includes('video is being processed') ||
-          text.includes('submit successful');
+          text.includes('submit successful') ||
+          text.includes('your video has been published') ||
+          text.includes('uploaded successfully') ||
+          text.includes('post published') ||
+          text.includes('your post is now live') ||
+          text.includes('video posted');
         const navigated =
           url.includes('/content') ||
           url.includes('/manage') ||
-          /\/video\/\d+/i.test(url);
-        return { started: publishingSignals || navigated };
+          /\/video\/\d+/i.test(url) ||
+          url.includes('tiktokstudio/content');
+        const resetToEmptyUpload =
+          text.includes('select video to upload') ||
+          text.includes('drag and drop') ||
+          text.includes('or drop video here');
+        return { started: publishingSignals || navigated || resetToEmptyUpload };
       }).catch(() => ({ started: false }));
-      return state.started;
+      if (state.started) return true;
+
+      // Secondary signal: the Post button was enabled+present before our click, but is
+      // now gone or disabled. TikTok's newer Studio UI briefly does this while the
+      // request is in flight, before any text feedback appears.
+      if (prevBtn && prevBtn.present && prevBtn.enabled) {
+        const now = await capturePostButtonState();
+        if (!now.present || !now.enabled) return true;
+      }
+      return false;
     };
 
     const clickPostOnce = async () => {
@@ -1121,8 +1167,30 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         const enabled = visible ? await btn.isEnabled().catch(() => false) : false;
         if (visible && enabled) {
           await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await btn.click({ timeout: 3000 });
-          return true;
+          try {
+            await btn.click({ timeout: 3000 });
+            return true;
+          } catch {
+            // Force click bypasses pointer-events / overlay interception
+            try { await btn.click({ timeout: 3000, force: true }); return true; } catch {}
+            const box = await btn.boundingBox().catch(() => null);
+            if (box) {
+              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+              return true;
+            }
+          }
+        }
+      } catch {}
+
+      // Text-based Playwright locator fallback (buttons without data-e2e)
+      try {
+        const alt = page.locator('button:has-text("Post"), button:has-text("Publish")').last();
+        const visible = await alt.isVisible({ timeout: 1200 }).catch(() => false);
+        const enabled = visible ? await alt.isEnabled().catch(() => false) : false;
+        if (visible && enabled) {
+          await alt.scrollIntoViewIfNeeded().catch(() => {});
+          try { await alt.click({ timeout: 3000 }); return true; }
+          catch { try { await alt.click({ timeout: 3000, force: true }); return true; } catch {} }
         }
       } catch {}
 
