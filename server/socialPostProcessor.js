@@ -267,13 +267,12 @@ async function processSocialPost(supabase, postId, notify) {
       completed_at: new Date().toISOString(),
     }).eq('id', postId);
 
-    // Cleanup must not depend on Telegram delivery. If at least one platform posted,
-    // remove the source bundle so folder schedules behave like video uploads.
+    // Cleanup must not depend on Telegram delivery. Only remove the source bundle
+    // after every selected platform succeeds. If LinkedIn (or any one platform)
+    // fails after X/Facebook succeed, keeping the local bundle allows the campaign
+    // to retry later instead of silently losing the missing platform post.
     const cleanupMeta = post.source_meta || await inferSourceMeta(supabase, post);
-    // Once any platform has a confirmed post URL, remove the local source bundle
-    // so the folder/importer cannot repost it. Failed platforms can still be
-    // retried from the stored social_posts image paths.
-    const cleanupLine = cleanupSourceFiles(cleanupMeta, successCount > 0);
+    const cleanupLine = cleanupSourceFiles(cleanupMeta, finalStatus === 'completed');
 
     if (notify) {
       try {
