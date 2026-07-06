@@ -74,17 +74,38 @@ async function waitForRealMediaPreview(page, expectedCount = 1, timeout = 45000)
   return false;
 }
 
-async function resolvePostedLinkedInUrl(page, fallbackUrl) {
-  await page.waitForTimeout(5000);
-  const href = await page.locator(
-    'a[href*="/feed/update/"], a[href*="urn:li:activity"], a[href*="/posts/"]'
-  ).first().getAttribute('href').catch(() => null);
-  if (href) {
-    const absolute = href.startsWith('http') ? href : `https://www.linkedin.com${href.startsWith('/') ? '' : '/'}${href}`;
-    return absolute.split('?')[0];
-  }
-  return fallbackUrl || page.url();
+function extractActivityUrn(str) {
+  if (!str) return null;
+  const m = String(str).match(/urn:li:activity:(\d+)|\/feed\/update\/urn%3Ali%3Aactivity%3A(\d+)|activity[-:](\d{15,25})|\/posts\/[^\/"?#]*-(\d{15,25})-/i);
+  if (!m) return null;
+  return m[1] || m[2] || m[3] || m[4] || null;
 }
+
+async function snapshotFeedActivityIds(page) {
+  return await page.evaluate(() => {
+    const ids = new Set();
+    const rx = /urn:li:activity:(\d+)|activity[-:](\d{15,25})/gi;
+    const html = document.documentElement.outerHTML;
+    let m;
+    while ((m = rx.exec(html)) !== null) ids.add(m[1] || m[2]);
+    return Array.from(ids);
+  }).catch(() => []);
+}
+
+async function resolvePostedLinkedInUrl(page, fallbackUrl, capturedUrn, beforeIds) {
+  if (capturedUrn) return `https://www.linkedin.com/feed/update/urn:li:activity:${capturedUrn}/`;
+  // Poll for a NEW activity URN not present before we clicked Post.
+  const before = new Set(beforeIds || []);
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const now = await snapshotFeedActivityIds(page);
+    const fresh = now.find((id) => !before.has(id));
+    if (fresh) return `https://www.linkedin.com/feed/update/urn:li:activity:${fresh}/`;
+    await page.waitForTimeout(1000);
+  }
+  return null;
+}
+
 
 async function attachImagesToComposer(page, imageFiles) {
   if (!imageFiles.length) return;
