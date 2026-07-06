@@ -74,17 +74,38 @@ async function waitForRealMediaPreview(page, expectedCount = 1, timeout = 45000)
   return false;
 }
 
-async function resolvePostedLinkedInUrl(page, fallbackUrl) {
-  await page.waitForTimeout(5000);
-  const href = await page.locator(
-    'a[href*="/feed/update/"], a[href*="urn:li:activity"], a[href*="/posts/"]'
-  ).first().getAttribute('href').catch(() => null);
-  if (href) {
-    const absolute = href.startsWith('http') ? href : `https://www.linkedin.com${href.startsWith('/') ? '' : '/'}${href}`;
-    return absolute.split('?')[0];
-  }
-  return fallbackUrl || page.url();
+function extractActivityUrn(str) {
+  if (!str) return null;
+  const m = String(str).match(/urn:li:activity:(\d+)|\/feed\/update\/urn%3Ali%3Aactivity%3A(\d+)|activity[-:](\d{15,25})|\/posts\/[^\/"?#]*-(\d{15,25})-/i);
+  if (!m) return null;
+  return m[1] || m[2] || m[3] || m[4] || null;
 }
+
+async function snapshotFeedActivityIds(page) {
+  return await page.evaluate(() => {
+    const ids = new Set();
+    const rx = /urn:li:activity:(\d+)|activity[-:](\d{15,25})/gi;
+    const html = document.documentElement.outerHTML;
+    let m;
+    while ((m = rx.exec(html)) !== null) ids.add(m[1] || m[2]);
+    return Array.from(ids);
+  }).catch(() => []);
+}
+
+async function resolvePostedLinkedInUrl(page, fallbackUrl, capturedUrn, beforeIds) {
+  if (capturedUrn) return `https://www.linkedin.com/feed/update/urn:li:activity:${capturedUrn}/`;
+  // Poll for a NEW activity URN not present before we clicked Post.
+  const before = new Set(beforeIds || []);
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const now = await snapshotFeedActivityIds(page);
+    const fresh = now.find((id) => !before.has(id));
+    if (fresh) return `https://www.linkedin.com/feed/update/urn:li:activity:${fresh}/`;
+    await page.waitForTimeout(1000);
+  }
+  return null;
+}
+
 
 async function attachImagesToComposer(page, imageFiles) {
   if (!imageFiles.length) return;
@@ -233,16 +254,50 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       if (disabled !== 'true' && !isDisabled) break;
       await page.waitForTimeout(500);
     }
-    await postBtn.click({ force: true }).catch(async () => {
-      await postBtn.click();
-    });
 
-    // Wait for the dialog to disappear (post submitted).
-    await page.waitForSelector('div[role="dialog"] div[contenteditable="true"]', { state: 'detached', timeout: 30000 }).catch(() => {});
-    return { url: await resolvePostedLinkedInUrl(page, targetUrl) };
+    // Snapshot existing activity URNs on the page BEFORE clicking Post, and
+    // start listening for the create-post network response to capture the new URN.
+    const beforeIds = await snapshotFeedActivityIds(page);
+    let capturedUrn = null;
+    const onResponse = async (resp) => {
+      try {
+        const url = resp.url();
+        if (!/contentcreation|normShares|feed\/api|voyager\/api\/(contentcreation|feed)/i.test(url)) return;
+        const fromUrl = extractActivityUrn(url);
+        if (fromUrl) { capturedUrn = capturedUrn || fromUrl; return; }
+        const ct = (resp.headers()['content-type'] || '').toLowerCase();
+        if (!ct.includes('json') && !ct.includes('text')) return;
+        const body = await resp.text().catch(() => '');
+        const fromBody = extractActivityUrn(body);
+        if (fromBody) capturedUrn = capturedUrn || fromBody;
+      } catch {}
+    };
+    page.on('response', onResponse);
+
+    try {
+      await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
+
+      // Wait for the composer dialog to close (post submitted).
+      const dialogGone = await page.waitForSelector('div[role="dialog"] div[contenteditable="true"]', { state: 'detached', timeout: 30000 }).then(() => true).catch(() => false);
+      if (!dialogGone) {
+        throw new Error('LinkedIn post dialog did not close after clicking Post. Post was not confirmed.');
+      }
+
+      // Give the network response a moment to arrive.
+      for (let i = 0; i < 20 && !capturedUrn; i++) await page.waitForTimeout(500);
+
+      const posted = await resolvePostedLinkedInUrl(page, targetUrl, capturedUrn, beforeIds);
+      if (!posted) {
+        throw new Error('LinkedIn post was submitted but no new activity URL could be confirmed. Refusing to report a stale URL.');
+      }
+      return { url: posted };
+    } finally {
+      page.off('response', onResponse);
+    }
   } finally {
     await safeClose(context);
   }
 }
+
 
 module.exports = { uploadToLinkedIn };
