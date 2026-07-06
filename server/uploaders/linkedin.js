@@ -114,6 +114,18 @@ async function resolvePostedLinkedInUrl(page, fallbackUrl, capturedUrn, beforeId
   return null;
 }
 
+async function hasLinkedInPostedSignal(page) {
+  return await page.evaluate(() => {
+    const text = Array.from(document.querySelectorAll('.artdeco-toast-item, [data-test-artdeco-toast-item-type], div[role="status"], div[aria-live], main'))
+      .map((el) => (el.innerText || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 5000);
+    return /\b(post|share|update)\b[^\n]{0,80}\b(published|posted|shared|live|successful|successfully)\b/i.test(text)
+      || /\b(your post is live|view post|post has been published|post was shared)\b/i.test(text);
+  }).catch(() => false);
+}
+
 async function getLinkedInSubmitState(page) {
   return await page.evaluate(() => {
     const visible = (el) => {
@@ -207,7 +219,7 @@ async function waitForLinkedInSubmitReady(page, timeout = 60000) {
     : 'LinkedIn Post button was not found in the composer.');
 }
 
-async function submitLinkedInPost(page) {
+async function submitLinkedInPost(page, getPostedUrl) {
   let lastError = '';
   for (let attempt = 1; attempt <= 4; attempt++) {
     await waitForLinkedInSubmitReady(page, attempt === 1 ? 60000 : 20000);
@@ -223,6 +235,12 @@ async function submitLinkedInPost(page) {
     while (Date.now() < deadline) {
       const err = await getLinkedInComposerError(page);
       if (err) throw new Error(`LinkedIn refused the post: ${err}`);
+
+      if (getPostedUrl) {
+        const posted = await getPostedUrl();
+        if (posted) return true;
+      }
+      if (await hasLinkedInPostedSignal(page)) return true;
 
       // Some LinkedIn safety flows open a second confirmation dialog. Press its
       // final Post/Publish button too instead of waiting forever on the composer.
@@ -408,7 +426,7 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
     page.on('response', onResponse);
 
     try {
-      await submitLinkedInPost(page);
+      await submitLinkedInPost(page, () => resolvePostedLinkedInUrl(page, targetUrl, capturedUrn, beforeIds));
 
       // Give the network response a moment to arrive.
       for (let i = 0; i < 20 && !capturedUrn; i++) await page.waitForTimeout(500);
