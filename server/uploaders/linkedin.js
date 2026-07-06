@@ -254,16 +254,50 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       if (disabled !== 'true' && !isDisabled) break;
       await page.waitForTimeout(500);
     }
-    await postBtn.click({ force: true }).catch(async () => {
-      await postBtn.click();
-    });
 
-    // Wait for the dialog to disappear (post submitted).
-    await page.waitForSelector('div[role="dialog"] div[contenteditable="true"]', { state: 'detached', timeout: 30000 }).catch(() => {});
-    return { url: await resolvePostedLinkedInUrl(page, targetUrl) };
+    // Snapshot existing activity URNs on the page BEFORE clicking Post, and
+    // start listening for the create-post network response to capture the new URN.
+    const beforeIds = await snapshotFeedActivityIds(page);
+    let capturedUrn = null;
+    const onResponse = async (resp) => {
+      try {
+        const url = resp.url();
+        if (!/contentcreation|normShares|feed\/api|voyager\/api\/(contentcreation|feed)/i.test(url)) return;
+        const fromUrl = extractActivityUrn(url);
+        if (fromUrl) { capturedUrn = capturedUrn || fromUrl; return; }
+        const ct = (resp.headers()['content-type'] || '').toLowerCase();
+        if (!ct.includes('json') && !ct.includes('text')) return;
+        const body = await resp.text().catch(() => '');
+        const fromBody = extractActivityUrn(body);
+        if (fromBody) capturedUrn = capturedUrn || fromBody;
+      } catch {}
+    };
+    page.on('response', onResponse);
+
+    try {
+      await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
+
+      // Wait for the composer dialog to close (post submitted).
+      const dialogGone = await page.waitForSelector('div[role="dialog"] div[contenteditable="true"]', { state: 'detached', timeout: 30000 }).then(() => true).catch(() => false);
+      if (!dialogGone) {
+        throw new Error('LinkedIn post dialog did not close after clicking Post. Post was not confirmed.');
+      }
+
+      // Give the network response a moment to arrive.
+      for (let i = 0; i < 20 && !capturedUrn; i++) await page.waitForTimeout(500);
+
+      const posted = await resolvePostedLinkedInUrl(page, targetUrl, capturedUrn, beforeIds);
+      if (!posted) {
+        throw new Error('LinkedIn post was submitted but no new activity URL could be confirmed. Refusing to report a stale URL.');
+      }
+      return { url: posted };
+    } finally {
+      page.off('response', onResponse);
+    }
   } finally {
     await safeClose(context);
   }
 }
+
 
 module.exports = { uploadToLinkedIn };
