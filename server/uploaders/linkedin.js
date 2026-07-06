@@ -10,6 +10,14 @@ async function isDialogOpen(page) {
   return await page.locator('div[role="dialog"] div[contenteditable="true"]').first().isVisible().catch(() => false);
 }
 
+async function getVisibleDialogCount(page) {
+  return await page.locator('div[role="dialog"]:visible').count().catch(() => 0);
+}
+
+async function getComposerText(page) {
+  return await page.locator('div[role="dialog"] div[contenteditable="true"]').first().innerText().catch(() => '');
+}
+
 async function openComposer(page) {
   // If a composer dialog is already mounted (Page admin auto-opens it), do nothing.
   if (await isDialogOpen(page)) return;
@@ -93,9 +101,9 @@ async function snapshotFeedActivityIds(page) {
 }
 
 async function resolvePostedLinkedInUrl(page, fallbackUrl, capturedUrn, beforeIds) {
-  if (capturedUrn) return `https://www.linkedin.com/feed/update/urn:li:activity:${capturedUrn}/`;
-  // Poll for a NEW activity URN not present before we clicked Post.
   const before = new Set(beforeIds || []);
+  if (capturedUrn && !before.has(capturedUrn)) return `https://www.linkedin.com/feed/update/urn:li:activity:${capturedUrn}/`;
+  // Poll for a NEW activity URN not present before we clicked Post.
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
     const now = await snapshotFeedActivityIds(page);
@@ -104,6 +112,157 @@ async function resolvePostedLinkedInUrl(page, fallbackUrl, capturedUrn, beforeId
     await page.waitForTimeout(1000);
   }
   return null;
+}
+
+async function hasLinkedInPostedSignal(page) {
+  return await page.evaluate(() => {
+    const text = Array.from(document.querySelectorAll('.artdeco-toast-item, [data-test-artdeco-toast-item-type], div[role="status"], div[aria-live], main'))
+      .map((el) => (el.innerText || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 5000);
+    return /\b(post|share|update)\b[^\n]{0,80}\b(published|posted|shared|live|successful|successfully)\b/i.test(text)
+      || /\b(your post is live|view post|post has been published|post was shared)\b/i.test(text);
+  }).catch(() => false);
+}
+
+async function getLinkedInSubmitState(page) {
+  return await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return style.visibility !== 'hidden' && style.display !== 'none' && r.width > 4 && r.height > 4;
+    };
+    const badText = /(post settings|post to|who can see|comment control|schedule|cancel|back|next|done)/i;
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(visible);
+    const searchRoots = dialogs.length ? dialogs.slice().reverse() : [document];
+    for (const root of searchRoots) {
+      const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter(visible);
+      const exact = buttons.find((btn) => {
+        const text = (btn.innerText || btn.textContent || btn.getAttribute('aria-label') || '').trim();
+        if (!/^(post|publish|share|post anyway)$/i.test(text)) return false;
+        if (badText.test(text) && !/^post anyway$/i.test(text)) return false;
+        return true;
+      });
+      if (!exact) continue;
+      const ariaDisabled = exact.getAttribute('aria-disabled') === 'true';
+      const disabled = exact.disabled === true || ariaDisabled || exact.className?.toString?.().includes('disabled');
+      const box = exact.getBoundingClientRect();
+      return {
+        found: true,
+        enabled: !disabled,
+        text: (exact.innerText || exact.textContent || exact.getAttribute('aria-label') || '').trim(),
+        x: box.left + box.width / 2,
+        y: box.top + box.height / 2,
+      };
+    }
+    return { found: false, enabled: false, text: '', x: 0, y: 0 };
+  }).catch(() => ({ found: false, enabled: false, text: '', x: 0, y: 0 }));
+}
+
+async function getLinkedInComposerError(page) {
+  return await page.evaluate(() => {
+    const text = Array.from(document.querySelectorAll('div[role="alert"], .artdeco-toast-item, [data-test-artdeco-toast-item-type], div[role="dialog"]'))
+      .map((el) => (el.innerText || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 3000);
+    const m = text.match(/(?:something went wrong|unable to post|couldn.?t post|failed to post|try again|review your post|unsupported|remove this|too long|exceeds|error)[^\n]{0,180}/i);
+    return m ? m[0].trim() : '';
+  }).catch(() => '');
+}
+
+async function clickLinkedInSubmit(page) {
+  const locators = [
+    page.locator('div[role="dialog"] button.share-actions__primary-action:visible').last(),
+    page.locator('div[role="dialog"] button[aria-label="Post"]:visible').last(),
+    page.locator('div[role="dialog"] button:has-text("Post anyway"):visible').last(),
+    page.locator('div[role="dialog"] button:has-text("Post"):not(:has-text("Post to")):not(:has-text("settings")):visible').last(),
+    page.locator('div[role="dialog"] button:has-text("Publish"):visible').last(),
+    page.locator('div[role="dialog"] button:has-text("Share"):visible').last(),
+  ];
+
+  for (const locator of locators) {
+    if (!(await locator.count().catch(() => 0))) continue;
+    if (!(await locator.isVisible().catch(() => false))) continue;
+    const ariaDisabled = await locator.getAttribute('aria-disabled').catch(() => null);
+    const disabled = await locator.isDisabled().catch(() => false);
+    if (ariaDisabled === 'true' || disabled) continue;
+    await locator.scrollIntoViewIfNeeded().catch(() => {});
+    if (await locator.click({ timeout: 5000 }).then(() => true).catch(() => false)) return true;
+    if (await locator.click({ force: true, timeout: 5000 }).then(() => true).catch(() => false)) return true;
+    const clickedByJs = await locator.evaluate((el) => { el.click(); return true; }).catch(() => false);
+    if (clickedByJs) return true;
+  }
+
+  const state = await getLinkedInSubmitState(page);
+  if (state.found && state.enabled && state.x && state.y) {
+    await page.mouse.click(state.x, state.y).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function waitForLinkedInSubmitReady(page, timeout = 60000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const err = await getLinkedInComposerError(page);
+    if (err) throw new Error(`LinkedIn refused the post: ${err}`);
+    const state = await getLinkedInSubmitState(page);
+    if (state.found && state.enabled) return state;
+    await page.waitForTimeout(1000);
+  }
+  const state = await getLinkedInSubmitState(page);
+  throw new Error(state.found
+    ? `LinkedIn Post button stayed disabled (${state.text || 'Post'}). Media/text was not accepted by the composer.`
+    : 'LinkedIn Post button was not found in the composer.');
+}
+
+async function submitLinkedInPost(page, getPostedUrl) {
+  let lastError = '';
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await waitForLinkedInSubmitReady(page, attempt === 1 ? 60000 : 20000);
+    const beforeDialogs = await getVisibleDialogCount(page);
+    const clicked = await clickLinkedInSubmit(page);
+    if (!clicked) {
+      lastError = 'Post button was visible but automation could not click it.';
+      await page.waitForTimeout(1000);
+      continue;
+    }
+
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      const err = await getLinkedInComposerError(page);
+      if (err) throw new Error(`LinkedIn refused the post: ${err}`);
+
+      if (getPostedUrl) {
+        const posted = await getPostedUrl();
+        if (posted) return true;
+      }
+      if (await hasLinkedInPostedSignal(page)) return true;
+
+      // Some LinkedIn safety flows open a second confirmation dialog. Press its
+      // final Post/Publish button too instead of waiting forever on the composer.
+      const dialogCount = await getVisibleDialogCount(page);
+      const state = await getLinkedInSubmitState(page);
+      if (dialogCount > beforeDialogs && state.found && state.enabled) {
+        await clickLinkedInSubmit(page);
+        await page.waitForTimeout(1500);
+      }
+
+      if (!(await isDialogOpen(page))) return true;
+      const currentState = await getLinkedInSubmitState(page);
+      if (!currentState.found || !currentState.enabled) {
+        // Button disappeared/disabled after click: likely submitting. Keep waiting.
+        await page.waitForTimeout(1000);
+        continue;
+      }
+      await page.waitForTimeout(1000);
+    }
+    lastError = `LinkedIn composer stayed open after Post click attempt ${attempt}.`;
+  }
+  throw new Error(`${lastError || 'LinkedIn post was not confirmed.'} Post was not published.`);
 }
 
 
@@ -239,20 +398,12 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       await page.waitForTimeout(500);
     }
 
-    if (imageFiles.length && !(await waitForRealMediaPreview(page, Math.min(imageFiles.length, 9), 10000))) {
-      throw new Error('LinkedIn uploaded media was not present after filling the post text. Aborting to avoid a text-only post.');
+    if (fullText && !(await getComposerText(page)).trim()) {
+      throw new Error('LinkedIn composer accepted the media but not the post text. Aborting to avoid an empty/media-only post.');
     }
 
-    // Click Post — wait for it to enable. Filter out "Post settings" / "Post to anyone" buttons.
-    const postBtn = page.locator(
-      'div[role="dialog"] button.share-actions__primary-action, div[role="dialog"] button[aria-label="Post"], div[role="dialog"] button:has-text("Post"):not(:has-text("Post to")):not(:has-text("settings"))'
-    ).first();
-    await postBtn.waitFor({ state: 'visible', timeout: 20000 });
-    for (let i = 0; i < 40; i++) {
-      const disabled = await postBtn.getAttribute('aria-disabled').catch(() => null);
-      const isDisabled = await postBtn.isDisabled().catch(() => false);
-      if (disabled !== 'true' && !isDisabled) break;
-      await page.waitForTimeout(500);
+    if (imageFiles.length && !(await waitForRealMediaPreview(page, Math.min(imageFiles.length, 9), 10000))) {
+      throw new Error('LinkedIn uploaded media was not present after filling the post text. Aborting to avoid a text-only post.');
     }
 
     // Snapshot existing activity URNs on the page BEFORE clicking Post, and
@@ -275,13 +426,7 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
     page.on('response', onResponse);
 
     try {
-      await postBtn.click({ force: true }).catch(async () => { await postBtn.click(); });
-
-      // Wait for the composer dialog to close (post submitted).
-      const dialogGone = await page.waitForSelector('div[role="dialog"] div[contenteditable="true"]', { state: 'detached', timeout: 30000 }).then(() => true).catch(() => false);
-      if (!dialogGone) {
-        throw new Error('LinkedIn post dialog did not close after clicking Post. Post was not confirmed.');
-      }
+      await submitLinkedInPost(page, () => resolvePostedLinkedInUrl(page, targetUrl, capturedUrn, beforeIds));
 
       // Give the network response a moment to arrive.
       for (let i = 0; i < 20 && !capturedUrn; i++) await page.waitForTimeout(500);
