@@ -2076,38 +2076,6 @@ function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, 
   return out;
 }
 
-function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, fallbackXBody, platforms) {
-  const out = {};
-  const liPost = sections['LINKEDIN_POST'] || '';
-  const fbPost = sections['FACEBOOK_POST'] || '';
-  const xPost = sections['X_POST'] || '';
-  const liFb = sections['LINKEDIN_FACEBOOK_POST'] || '';
-  const xLegacy = sections['X_THREAD_OR_LONG_POST'] || '';
-
-  const links = articleUrlsBlock
-    ? '\n\n' + articleUrlsBlock.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
-        const m = l.match(/^[^:]+:\s*(https?:\/\/.+)$/);
-        return m ? m[1] : l;
-      }).join('\n')
-    : '';
-
-  const liFinal = stripTechPulsePrefix((liPost || liFb || fallbackBody || '').trim());
-  const fbFinal = stripTechPulsePrefix((fbPost || liFb || fallbackBody || '').trim());
-  const xFinal = stripTechPulsePrefix((xPost || xLegacy || fallbackXBody || fallbackBody || '').trim());
-  const hasExplicitX = !!(xPost || xLegacy);
-  const hasExplicitLi = !!(liPost || liFb);
-  const hasExplicitFb = !!(fbPost || liFb);
-
-  for (const p of platforms) {
-    if (p === 'x' && xFinal) {
-      const xWithLink = /https?:\/\/\S+/i.test(xFinal) ? xFinal : `${xFinal}${links}`;
-      out.x = fitForX(xWithLink.trim());
-    }
-    else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
-    else if (p === 'facebook' && fbFinal) out.facebook = (fbFinal + (hasExplicitFb ? '' : links)).trim();
-  }
-  return out;
-}
 
 
 function deriveSocialPostFallbackBody(rawText) {
