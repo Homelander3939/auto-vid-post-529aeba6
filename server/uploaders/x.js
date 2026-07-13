@@ -151,7 +151,6 @@ function buildXPostText(description, hashtags = []) {
   tail = tail ? `\n\n${tail}` : '';
   if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
 
-  // Pack close to the 260 weighted-char budget before trimming.
   while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_CHARS) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
     body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;

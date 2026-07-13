@@ -1995,13 +1995,11 @@ function cleanXHashtags(text) {
 }
 
 // Fit text to X free-tier. Keep the first link, keep at most one hashtag, and
-// use only the first story from a multi-story digest/thread. When the primary
-// body is short, enrich it from `extra` so we use as much of the 280 budget
-// as possible before the hashtag + link tail.
-function fitForX(text, extra = '') {
+// use only the first story from a multi-story digest/thread.
+function fitForX(text) {
   const raw = String(text || '').trim();
-  const firstUrl = firstUrlFromText(raw) || firstUrlFromText(extra);
-  const tag = (cleanXHashtags(raw)[0] || cleanXHashtags(extra)[0] || '');
+  const firstUrl = firstUrlFromText(raw);
+  const tag = cleanXHashtags(raw)[0] || '';
   let body = firstXStory(raw)
     .replace(/https?:\/\/\S+/g, '')
     .replace(/#[\p{L}\p{N}_]+/gu, '')
@@ -2011,20 +2009,6 @@ function fitForX(text, extra = '') {
   let tail = [tag, firstUrl].filter(Boolean).join('\n');
   tail = tail ? `\n\n${tail}` : '';
   if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
-
-  // Enrich short body with the fuller fallback text so we pack close to 280.
-  const extraClean = firstXStory(String(extra || ''))
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/#[\p{L}\p{N}_]+/gu, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
-  if (extraClean && extraClean.toLowerCase() !== body.toLowerCase()
-      && !extraClean.toLowerCase().startsWith(body.toLowerCase())
-      && !body.toLowerCase().startsWith(extraClean.toLowerCase())) {
-    const merged = body ? `${body} ${extraClean}` : extraClean;
-    if (xWeightedLength(`${merged}${tail}`.trim()) <= X_SAFE_LIMIT + 40) body = merged;
-    else if (xWeightedLength(`${body}${tail}`.trim()) + 20 < X_SAFE_LIMIT) body = merged;
-  }
 
   while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_LIMIT) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
@@ -2062,20 +2046,16 @@ function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, 
   const hasExplicitLi = !!(liPost || liFb);
   const hasExplicitFb = !!(fbPost || liFb);
 
-  // Filler for X when its own section is too short to fill 260 weighted chars.
-  const xFiller = stripTechPulsePrefix((liPost || fbPost || liFb || fallbackBody || '').trim());
-
   for (const p of platforms) {
     if (p === 'x' && xFinal) {
       const xWithLink = /https?:\/\/\S+/i.test(xFinal) ? xFinal : `${xFinal}${links}`;
-      out.x = fitForX(xWithLink.trim(), xFiller);
+      out.x = fitForX(xWithLink.trim());
     }
     else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
     else if (p === 'facebook' && fbFinal) out.facebook = (fbFinal + (hasExplicitFb ? '' : links)).trim();
   }
   return out;
 }
-
 
 
 function deriveSocialPostFallbackBody(rawText) {
