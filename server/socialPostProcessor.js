@@ -30,6 +30,40 @@ function cleanTelegramText(value, max = 900) {
     .slice(0, max);
 }
 
+function cleanXBodyForValidation(value) {
+  return String(value || '')
+    .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
+    .replace(/^[\s\n]*\d+\.\s*[^:\n]{2,45}\s*:\s*/i, '')
+    .replace(/^---(?:END_)?[A-Z_]+---$/gmi, '')
+    .replace(/^\s*(?:x|twitter)(?:_post| post)?\s*:\s*/i, '')
+    .replace(/^\s*(?:article_urls?|source|url|link)\s*:\s*https?:\/\/\S+\s*$/gmi, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/\b(?:LINKEDIN|FACEBOOK|X)_(?:POST|THREAD_OR_LONG_POST)\b/gi, '')
+    .replace(/\bTECHPULSE_SOCIAL_POST_V1\b/gi, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\b(?:https?|www|com|net|org|technewslist)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasMeaningfulXBody(value) {
+  const cleaned = cleanXBodyForValidation(value);
+  const words = cleaned.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  return cleaned.length >= 25 && words.length >= 5;
+}
+
+function resolvePlatformDescription(post, platform) {
+  const variants = post.platform_variants || {};
+  const variant = variants[platform];
+  let description = (variant && variant.description) ? variant.description : (post.description || '');
+  if (platform === 'x' && !hasMeaningfulXBody(description)) {
+    description = [post.description, variants.linkedin?.description, variants.facebook?.description]
+      .find((candidate) => hasMeaningfulXBody(candidate)) || description;
+  }
+  return description;
+}
+
 async function loadAccounts(supabase, ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return new Map();
@@ -229,7 +263,7 @@ async function processSocialPost(supabase, postId, notify) {
       try {
         // Use per-platform variant when available; fall back to the main description/hashtags
         const variant = (post.platform_variants || {})[r.name];
-        const platformDescription = (variant && variant.description) ? variant.description : (post.description || '');
+        const platformDescription = resolvePlatformDescription(post, r.name);
         const platformHashtags = (variant && variant.hashtags && variant.hashtags.length)
           ? variant.hashtags
           : (post.hashtags || []);
