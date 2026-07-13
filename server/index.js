@@ -1960,6 +1960,39 @@ function firstUrlFromText(text) {
   return m ? m[0].replace(/[),.;!?]+$/g, '') : '';
 }
 
+function cleanXBodyCandidate(text) {
+  return stripTechPulsePrefix(String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^---(?:END_)?[A-Z_]+---$/gmi, '')
+    .replace(/^\s*(?:x|twitter)(?:_post| post)?\s*:\s*/i, '')
+    .replace(/^\s*(?:article_urls?|source|url|link)\s*:\s*https?:\/\/\S+\s*$/gmi, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/\b(?:LINKEDIN|FACEBOOK|X)_(?:POST|THREAD_OR_LONG_POST)\b/gi, '')
+    .replace(/\bTECHPULSE_SOCIAL_POST_V1\b/gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim());
+}
+
+function isMeaningfulXBody(text) {
+  const cleaned = cleanXBodyCandidate(text)
+    .replace(/\b(?:https?|www|com|net|org|technewslist)\b/gi, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = cleaned.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  return cleaned.length >= 25 && words.length >= 5;
+}
+
+function chooseXBody(candidates) {
+  for (const candidate of candidates) {
+    if (!isMeaningfulXBody(candidate)) continue;
+    return cleanXBodyCandidate(firstXStory(candidate));
+  }
+  return '';
+}
+
 function firstXStory(text) {
   let s = stripTechPulsePrefix(String(text || '')
     .replace(/\r\n/g, '\n')
@@ -1981,34 +2014,16 @@ function firstXStory(text) {
   return stripTechPulsePrefix(s);
 }
 
-function cleanXHashtags(text) {
-  const seen = new Set();
-  const out = [];
-  for (const raw of String(text || '').match(/#[\p{L}\p{N}_]+/gu) || []) {
-    const tag = raw.replace(/[^#\p{L}\p{N}_]/gu, '');
-    const key = tag.toLowerCase();
-    if (!tag || seen.has(key)) continue;
-    seen.add(key);
-    out.push(tag);
-  }
-  return out.slice(0, 1);
-}
-
-// Fit text to X free-tier. Keep the first link, keep at most one hashtag, and
-// use only the first story from a multi-story digest/thread.
+// Fit text to X free-tier. Keep the first link, drop hashtags, and use only the
+// first real story from a multi-story digest/thread. X should never publish a
+// link/hashtag-only post when a short post body exists in the bundle.
 function fitForX(text) {
   const raw = String(text || '').trim();
   const firstUrl = firstUrlFromText(raw);
-  const tag = cleanXHashtags(raw)[0] || '';
-  let body = firstXStory(raw)
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/#[\p{L}\p{N}_]+/gu, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
+  let body = cleanXBodyCandidate(firstXStory(raw));
 
-  let tail = [tag, firstUrl].filter(Boolean).join('\n');
+  let tail = firstUrl || '';
   tail = tail ? `\n\n${tail}` : '';
-  if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
 
   while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_LIMIT) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
@@ -2041,14 +2056,18 @@ function buildSocialPostPlatformTexts(sections, articleUrlsBlock, fallbackBody, 
 
   const liFinal = stripTechPulsePrefix((liPost || liFb || fallbackBody || '').trim());
   const fbFinal = stripTechPulsePrefix((fbPost || liFb || fallbackBody || '').trim());
-  const xFinal = stripTechPulsePrefix((xPost || xLegacy || fallbackXBody || fallbackBody || '').trim());
+  const xFinal = chooseXBody([xPost, xLegacy, fallbackXBody, liFb, liPost, fbPost, fallbackBody]);
   const hasExplicitX = !!(xPost || xLegacy);
   const hasExplicitLi = !!(liPost || liFb);
   const hasExplicitFb = !!(fbPost || liFb);
 
   for (const p of platforms) {
     if (p === 'x' && xFinal) {
-      const xWithLink = /https?:\/\/\S+/i.test(xFinal) ? xFinal : `${xFinal}${links}`;
+      const sourceForLink = [xPost, xLegacy, articleUrlsBlock, fallbackXBody, liFb, liPost, fbPost, fallbackBody].find((value) => firstUrlFromText(value)) || '';
+      const link = firstUrlFromText(xFinal) || firstUrlFromText(sourceForLink);
+      const xWithLink = link && !new RegExp(link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(xFinal)
+        ? `${xFinal}\n\n${link}`
+        : xFinal;
       out.x = fitForX(xWithLink.trim());
     }
     else if (p === 'linkedin' && liFinal) out.linkedin = (liFinal + (hasExplicitLi ? '' : links)).trim();
