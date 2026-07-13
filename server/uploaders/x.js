@@ -50,10 +50,32 @@ function stripXNoise(value) {
   return String(value || '')
     .replace(/^[\s\n]*TechPulse\s*:\s*/i, '')
     .replace(/^[\s\n]*\d+\.\s*[^:\n]{2,40}\s*:\s*/i, '')
+    .replace(/^---(?:END_)?[A-Z_]+---$/gmi, '')
     .replace(/^\s*(?:x|twitter)(?:_post| post)?\s*:\s*/i, '')
     .replace(/^\s*\d+\s*\/\s*\d+\s*/gm, '')
+    .replace(/^\s*(?:article_urls?|source|url|link)\s*:\s*https?:\/\/\S+\s*$/gmi, '')
     .replace(/\b(?:LINKEDIN|FACEBOOK|X)_(?:POST|THREAD_OR_LONG_POST)\b/gi, '')
+    .replace(/\bTECHPULSE_SOCIAL_POST_V1\b/gi, '')
     .trim();
+}
+
+function cleanXBodyCandidate(value) {
+  return stripXNoise(value)
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function isMeaningfulXBody(value) {
+  const cleaned = cleanXBodyCandidate(value)
+    .replace(/\b(?:https?|www|com|net|org|technewslist)\b/gi, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = cleaned.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  return cleaned.length >= 25 && words.length >= 5;
 }
 
 function firstXStory(value) {
@@ -82,26 +104,18 @@ function firstXStory(value) {
 // body words. Always fits within the safe X free-tier limit.
 function trimToXLimit(value, limit = X_SAFE_CHARS) {
   let s = String(value || '').trim();
-  if (xWeightedLength(s) <= limit) return s;
-
   const urlRe = /https?:\/\/\S+/g;
-  const urls = s.match(urlRe) || [];
-  if (urls.length > 1) {
-    const first = urls[0];
-    let seen = false;
-    s = s.replace(urlRe, (u) => {
-      if (u === first && !seen) { seen = true; return u; }
-      return '';
-    }).replace(/[ \t]{2,}/g, ' ').trim();
-  }
+  const firstUrl = uniqueUrls(s)[0] || '';
+  s = s
+    .replace(urlRe, '')
+    .replace(/\s*#[\p{L}\p{N}_]+/gu, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+  if (firstUrl) s = `${s}\n\n${firstUrl}`.trim();
   if (xWeightedLength(s) <= limit) return s;
 
-  s = s.replace(/\s*#[\p{L}0-9_]+/gu, '').replace(/[ \t]{2,}/g, ' ').trim();
-  if (xWeightedLength(s) <= limit) return s;
-
-  const firstUrl = (s.match(urlRe) || [])[0] || '';
   let body = firstUrl ? s.replace(firstUrl, '').trim() : s;
-  const tail = firstUrl ? `\n${firstUrl}` : '';
+  const tail = firstUrl ? `\n\n${firstUrl}` : '';
   while (xWeightedLength((body + tail).trim()) + 1 > limit && body.length > 0) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
     body = cut === body ? body.slice(0, Math.max(0, body.length - 1)) : cut;
@@ -133,23 +147,13 @@ function buildXPostText(description, hashtags = []) {
   const raw = String(description || '').replace(/\r\n/g, '\n');
   const firstUrl = uniqueUrls(raw)[0] || '';
 
-  let body = firstXStory(raw)
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/#[\p{L}\p{N}_]+/gu, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  let body = cleanXBodyCandidate(firstXStory(raw));
 
-  // X automatic campaign posts get max one hashtag. Keep the link, remove tag
-  // stuffing, then trim the body. Manual posts go through this same uploader too.
-  const inlineTags = formatXHashtags(raw.match(/#[\p{L}\p{N}_]+/gu) || []);
-  const tags = [...inlineTags, ...formatXHashtags(hashtags)].filter((tag, idx, arr) =>
-    arr.findIndex((x) => x.toLowerCase() === tag.toLowerCase()) === idx,
-  ).slice(0, 1);
-
-  let tail = [tags[0], firstUrl].filter(Boolean).join('\n');
+  // For X free accounts, text quality matters more than hashtag stuffing. Keep
+  // one real caption + one URL. Drop hashtags completely to avoid duplicate
+  // tags/links pushing scheduled campaign posts over the hard 280-char cap.
+  let tail = firstUrl;
   tail = tail ? `\n\n${tail}` : '';
-  if (xWeightedLength(tail.trim()) > 70 && firstUrl) tail = `\n\n${firstUrl}`;
 
   while (body && xWeightedLength(`${body}${tail}`.trim()) + 1 > X_SAFE_CHARS) {
     const cut = body.replace(/\s*\S+\s*$/, '').trim();
