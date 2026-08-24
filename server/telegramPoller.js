@@ -108,6 +108,7 @@ async function hydrateTelegramImages(botToken, incoming, supabase, options = {})
       size: validated.byteLength,
       url: data.publicUrl,
       storage_path: storagePath,
+      storage_bucket: 'videos',
       telegram_file_unique_id: candidate.uniqueId,
     });
   }

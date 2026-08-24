@@ -10,9 +10,11 @@ const {
 const {
   assertSafeImageUrl,
   extractMarkdownImageUrls,
+  loadImageInput,
   materializeVisionMessages,
   validateImageBuffer,
 } = require('../visualMedia');
+const { STORAGE_DIR } = require('../localDatabase');
 const { __test: aiTest } = require('../ai-handler');
 
 test('Telegram updates map to deterministic local message and command IDs', () => {
@@ -95,8 +97,31 @@ test('Telegram images are validated, stored locally, and exposed without persist
   });
   assert.equal(images.length, 1);
   assert.match(images[0].url, /^http:\/\/localhost:3001\/api\/local-storage\/videos\//);
+  assert.equal(images[0].storage_bucket, 'videos');
   assert.equal(uploads.length, 1);
   assert.doesNotMatch(JSON.stringify(images), /secret-bot-token/);
+});
+
+test('local Telegram vision works while the full HTTP uploader is stopped', async () => {
+  const fs = require('fs');
+  const path = require('path');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=', 'base64');
+  const storagePath = 'telegram/test/local-agent-worker.png';
+  const filePath = path.join(STORAGE_DIR, 'videos', ...storagePath.split('/'));
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, png);
+  try {
+    const image = await loadImageInput({
+      url: 'http://localhost:3001/api/local-storage/videos/unavailable.png',
+      storage_path: storagePath,
+      storage_bucket: 'videos',
+      type: 'image/png',
+    });
+    assert.equal(image.mimeType, 'image/png');
+    assert.equal(image.byteLength, png.length);
+  } finally {
+    fs.rmSync(path.join(STORAGE_DIR, 'videos', 'telegram', 'test'), { recursive: true, force: true });
+  }
 });
 
 test('vision messages include real image bytes and preserve a photo for a later follow-up', async () => {

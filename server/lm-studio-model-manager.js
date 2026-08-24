@@ -68,6 +68,11 @@ function planSingleModelTransition(models, preferredModel = DEFAULT_MODEL, loadI
   };
 }
 
+function singleLoadedModel(models) {
+  const loaded = flattenLoadedLLMs(models);
+  return loaded.length === 1 ? loaded[0] : null;
+}
+
 function runExclusive(work) {
   const run = transitionTail.then(work, work);
   transitionTail = run.catch(() => undefined);
@@ -189,6 +194,20 @@ async function ensureSingleLocalLLM(options = {}) {
     const contextLength = Math.max(4096, Number(options.contextLength || DEFAULT_CONTEXT_LENGTH));
     await ensureLocalServer(baseUrl);
     let inventory = await readModelInventory(baseUrl);
+    const preserved = options.preserveLoaded === true ? singleLoadedModel(inventory) : null;
+    if (preserved) {
+      console.log(`[LMStudioGuard] Reusing the factory's only loaded LLM: ${preserved.id} (${preserved.key}).`);
+      return {
+        ready: true,
+        modelId: preserved.id,
+        modelKey: preserved.key,
+        vision: preserved.vision,
+        toolUse: preserved.toolUse,
+        contextLength: preserved.contextLength || contextLength,
+        unloaded: [],
+        loadedNow: false,
+      };
+    }
     let plan = planSingleModelTransition(inventory, preferredModel, loadIfMissing, contextLength);
 
     // Eject every non-selected LLM before loading anything. The order is the
@@ -272,5 +291,5 @@ module.exports = {
   ensureSingleLocalLLM,
   getSingleLocalLLMStatus,
   readModelInventory,
-  __test: { flattenLoadedLLMs, isAgentLLM, planSingleModelTransition },
+  __test: { flattenLoadedLLMs, isAgentLLM, planSingleModelTransition, singleLoadedModel },
 };

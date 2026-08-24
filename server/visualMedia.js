@@ -1,4 +1,7 @@
+const fs = require('fs');
+const path = require('path');
 const fetch = require('node-fetch');
+const { STORAGE_DIR } = require('./localDatabase');
 
 const MAX_VISION_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VISION_IMAGES_PER_MESSAGE = 2;
@@ -52,6 +55,20 @@ async function responseToValidatedImage(response, options = {}) {
 }
 
 async function loadImageInput(input, options = {}) {
+  const storagePath = typeof input === 'object' ? String(input?.storage_path || '').trim() : '';
+  if (storagePath) {
+    const bucket = String(input?.storage_bucket || 'videos').replace(/[^a-zA-Z0-9._-]/g, '-');
+    const bucketRoot = path.resolve(STORAGE_DIR, bucket);
+    const segments = storagePath.replace(/\\/g, '/').split('/').filter(Boolean)
+      .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '-'));
+    const localPath = path.resolve(bucketRoot, ...segments);
+    if (localPath !== bucketRoot && !localPath.startsWith(`${bucketRoot}${path.sep}`)) {
+      throw new Error('Unsafe local image storage path');
+    }
+    let buffer;
+    try { buffer = fs.readFileSync(localPath); } catch { throw new Error('Stored local image file is unavailable'); }
+    return validateImageBuffer(buffer, input?.type || '', options.maxBytes);
+  }
   const value = typeof input === 'string' ? input : input?.url;
   if (!value) throw new Error('Image URL is missing');
   if (String(value).startsWith('data:')) return parseImageDataUrl(value, options.maxBytes);

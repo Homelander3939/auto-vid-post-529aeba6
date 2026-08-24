@@ -280,6 +280,22 @@ test('LM Studio guard always ejects other LLMs before selecting Qwen 3.8', () =>
   assert.equal(reloadForLargerContext.loadModel, 'qwen3.8-27b-uncensored-aggressive');
 });
 
+test('lightweight Telegram worker preserves exactly one factory-loaded model', () => {
+  const inventory = [{
+    key: 'qwen/qwen3.6-35b-a3b',
+    type: 'llm',
+    vision: true,
+    toolUse: true,
+    loadedInstances: [{ id: 'factory-qwen', contextLength: 10240 }],
+  }];
+  const preserved = modelManager.singleLoadedModel(inventory);
+  assert.equal(preserved.id, 'factory-qwen');
+  assert.equal(preserved.key, 'qwen/qwen3.6-35b-a3b');
+  assert.equal(modelManager.singleLoadedModel([...inventory, {
+    key: 'another/model', type: 'llm', loadedInstances: [{ id: 'second-model' }],
+  }]), null);
+});
+
 test('AI requests stay within the local model prompt budget while preserving fresh skills', () => {
   const longSnapshot = `Generated: now\nSettings: local\n${Array.from({ length: 30 }, (_, index) => `VIDEO JOB QUEUE (${index})\n  job-${index} | partial | ${'changed '.repeat(100)}`).join('\n')}\nLOCAL AGENT KNOWLEDGE\n  PixelRAG [pixelrag]; triggers=screenshot this URL; purpose=visual search\n  Human Browser Operator (Vision) [local-browser-operator]; use=run_local_browser`;
   const compact = aiHandler.compactContextForTool(longSnapshot);

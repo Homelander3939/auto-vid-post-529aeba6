@@ -197,6 +197,7 @@ async function getSelectedChatConfig(supabase) {
       preferredModel: config.model,
       baseUrl: config.url,
       loadIfMissing: true,
+      preserveLoaded: process.env.LM_STUDIO_PRESERVE_LOADED_MODEL === '1',
     });
     LM_STUDIO_MODEL = runtime.modelId;
     return { provider, endpoint: openAICompatEndpoint(provider, config.url), model: runtime.modelId, apiKey: config.apiKey || 'lm-studio' };
@@ -2557,6 +2558,9 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
     aiReply = await callLMStudioWithTools(aiMessages, supabase);
   } catch (e) {
     console.error('[AI] Telegram AI call failed:', e.message);
+    // The image is part of the user's request. Let the local command worker
+    // retry instead of saving a misleading text-only response as completed.
+    if (/attached image could not be loaded/i.test(String(e.message || ''))) throw e;
     aiReply = `AI processing failed: ${e.message}. Make sure LM Studio is running at ${LM_STUDIO_URL}`;
   }
 
