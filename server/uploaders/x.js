@@ -1,5 +1,6 @@
 // X (Twitter) post uploader using a persistent Chrome profile.
 const { launchPersistent, safeClose } = require('./social-post-base');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 // NOTE: do NOT import overlay-dismiss here. The compose UI is a role="dialog"
 // and X's close (✕) button has a screen-reader-only "Close" span — the generic
 // overlay dismisser would click it, trigger the "Save / Discard draft" prompt,
@@ -213,6 +214,14 @@ async function getMyHandle(page) {
   return handleFromAvatar;
 }
 
+async function getActiveXComposerTextArea(page) {
+  const modal = page.locator(
+    '[role="dialog"]:visible div[role="textbox"][data-testid^="tweetTextarea"]:visible'
+  );
+  if (await modal.count().catch(() => 0)) return modal.last();
+  return page.locator('div[role="textbox"][data-testid^="tweetTextarea"]:visible').last();
+}
+
 async function clearXComposer(page, textArea) {
   // X /compose/post may auto-restore a prior unsent draft (especially after a
   // failed scheduled run). A simple Ctrl+A+Backspace clears the visible text
@@ -232,37 +241,29 @@ async function clearXComposer(page, textArea) {
 async function insertXText(page, textArea, text) {
   await clearXComposer(page, textArea);
 
-  // X is React-controlled. CDP keyboard insertion can make text appear while
-  // React's composer state remains empty, so the media-only Post button becomes
-  // enabled and publishes photos without text. execCommand('insertText') fires
-  // the beforeinput/input sequence React listens for; use it as the primary path.
+  // X's current composer is Draft.js-controlled. DOM execCommand insertion can
+  // make text look correct while leaving Draft.js state empty; attaching media
+  // then remounts the editor and the visible text disappears. Real keyboard
+  // events update the same state that X uses when it remounts the composer.
   const desired = String(text || '');
   if (!desired) return;
-  const inserted = await textArea.evaluate((el, value) => {
-    el.focus();
-    let ok = false;
-    const chunks = String(value || '').match(/[\s\S]{1,24}/g) || [];
-    for (const chunk of chunks) ok = document.execCommand('insertText', false, chunk) || ok;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: value || '' }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    const visible = (el.innerText || el.textContent || '').trim();
-    return { ok, visible };
-  }, desired).catch(() => ({ ok: false, visible: '' }));
+  await textArea.click({ force: true }).catch(async () => {
+    await textArea.evaluate((el) => el.focus()).catch(() => {});
+  });
+  await page.keyboard.type(desired, { delay: 2 });
+  await page.waitForTimeout(500);
 
-  let visibleText = String(inserted?.visible || '').trim();
-  if ((!inserted?.ok || !visibleText) && desired) {
-    await textArea.click().catch(() => {});
-    await page.keyboard.insertText(desired).catch(() => {});
-    await page.waitForTimeout(400);
-    visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
+  // Resolve the active modal editor again because media/draft UI updates can
+  // replace the contenteditable node while keeping the same test id.
+  const activeTextArea = await getActiveXComposerTextArea(page);
+  const visibleText = await activeTextArea
+    .evaluate((el) => (el.innerText || el.textContent || '').trim())
+    .catch(() => '');
+  const expectedNeedle = normalizeForXMatch(desired).slice(0, 70);
+  if (!visibleText || (expectedNeedle && !normalizeForXMatch(visibleText).includes(expectedNeedle))) {
+    throw new Error('X composer text could not be committed to its editor state. Leaving source files for retry.');
   }
-  if (!visibleText && desired) {
-    await textArea.click().catch(() => {});
-    await page.keyboard.type(desired, { delay: 1 }).catch(() => {});
-    await page.waitForTimeout(400);
-    visibleText = await textArea.evaluate((el) => (el.innerText || el.textContent || '').trim()).catch(() => '');
-  }
-  if (!visibleText) throw new Error('X composer text could not be inserted. Leaving source files for retry.');
+  return activeTextArea;
 }
 
 async function ensureXTextWithinLimit(page, textArea, desiredText) {
@@ -361,14 +362,14 @@ async function isXPostButtonEnabled(page) {
   return ariaDisabled !== 'true' && !disabled;
 }
 
-async function getXMediaState(page) {
-  return await page.evaluate(() => {
+async function getXMediaState(page, textArea = null) {
+  const activeTextArea = textArea || await getActiveXComposerTextArea(page);
+  return await activeTextArea.evaluate((textbox) => {
     const visible = (el) => {
       const r = el.getBoundingClientRect();
       const s = window.getComputedStyle(el);
       return r.width > 8 && r.height > 8 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
     };
-    const textbox = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
     const composer = textbox?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
     const previews = Array.from(composer.querySelectorAll([
       '[data-testid="attachments"] img',
@@ -398,13 +399,13 @@ async function getXMediaState(page) {
   }).catch(() => ({ previews: 0, busy: false, problem: '' }));
 }
 
-async function waitForXMediaReady(page, expectedCount, timeout = 120000) {
+async function waitForXMediaReady(page, textArea, expectedCount, timeout = 120000) {
   if (!expectedCount) return true;
   const deadline = Date.now() + timeout;
   let stableReadySince = 0;
   let lastState = null;
   while (Date.now() < deadline) {
-    const state = await getXMediaState(page);
+    const state = await getXMediaState(page, textArea);
     lastState = state;
     if (/failed to upload|could not upload|unsupported|too large|try again/i.test(state.problem || '')) {
       throw new Error(`X rejected the media: ${state.problem}. Leaving source files for retry.`);
@@ -433,8 +434,8 @@ async function verifyXComposerHasText(page, expectedText, timeout = 15000) {
   const deadline = Date.now() + timeout;
   let last = '';
   while (Date.now() < deadline) {
-    const state = await page.evaluate(() => {
-      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
+    const textArea = await getActiveXComposerTextArea(page);
+    const state = await textArea.evaluate((el) => {
       const text = (el?.innerText || el?.textContent || '').trim();
       const composer = el?.closest('[role="dialog"], form, main, [data-testid="primaryColumn"]') || document;
       const enabledButton = Array.from(composer.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"], [aria-label="Post"][role="button"], button, [role="button"]'))
@@ -725,8 +726,27 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       throw new Error('X requires login. Use Prepare in Settings to log in once.');
     }
 
-    const textArea = page.locator('div[role="textbox"][data-testid^="tweetTextarea"]').first();
-    await textArea.waitFor({ state: 'visible', timeout: 30000 });
+    let textArea = await getActiveXComposerTextArea(page);
+    try {
+      await textArea.waitFor({ state: 'visible', timeout: 30000 });
+    } catch (composerError) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'X social post',
+        checkpoint: 'composer visible',
+        originalError: composerError.message,
+        // Do not allow Close/Cancel here: X uses those controls to discard a draft.
+        allowedClickTexts: ['retry', 'try again', 'reload'],
+        verify: async () => {
+          const candidate = await getActiveXComposerTextArea(page);
+          return candidate.isVisible().catch(() => false);
+        },
+      });
+      if (!arbiter.recovered) {
+        throw new Error(`X composer did not become visible. AI arbiter could not safely clear the obstacle: ${arbiter.reason}. Leaving source files for retry.`);
+      }
+      textArea = await getActiveXComposerTextArea(page);
+      await textArea.waitFor({ state: 'visible', timeout: 10000 });
+    }
 
     const fullText = buildXPostText(description || '', hashtags);
     if (xWeightedLength(fullText) > X_MAX_CHARS) {
@@ -738,7 +758,10 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     const postedText = await ensureXTextWithinLimit(page, textArea, fullText);
 
     if (xImageFiles.length) {
-      const fileInput = page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"]').first();
+      const modalFileInputs = page.locator('[role="dialog"]:visible input[type="file"]');
+      const fileInput = (await modalFileInputs.count().catch(() => 0))
+        ? modalFileInputs.last()
+        : page.locator('input[type="file"][accept*="image"], input[type="file"][accept*="video"], input[type="file"]').last();
       await fileInput.setInputFiles(xImageFiles).catch(async () => {
         const attach = page.locator('[data-testid="fileInput"], [aria-label*="media" i]').first();
         await attach.click({ trial: true }).catch(() => {});
@@ -746,13 +769,14 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       });
       await page.locator('[data-testid="attachments"] img, [data-testid="attachments"] video, [data-testid="attachments"] [style*="background-image"], img[src^="blob:"], video[src^="blob:"], [style*="blob:"]').first()
         .waitFor({ state: 'visible', timeout: 45000 });
-      await waitForXMediaReady(page, xImageFiles.length, 120000);
+      const activeAfterMedia = await getActiveXComposerTextArea(page);
+      await waitForXMediaReady(page, activeAfterMedia, xImageFiles.length, 120000);
     }
 
-    const readComposerText = async () => await page.evaluate(() => {
-      const el = document.querySelector('div[role="textbox"][data-testid^="tweetTextarea"]');
-      return ((el?.innerText || el?.textContent || '')).trim();
-    }).catch(() => '');
+    const readComposerText = async () => {
+      const active = await getActiveXComposerTextArea(page);
+      return await active.evaluate((el) => ((el?.innerText || el?.textContent || '')).trim()).catch(() => '');
+    };
 
     let confirmed = false;
     let publishedUrl = null;
@@ -765,8 +789,9 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
       const currentText = await readComposerText();
       const currentNeedle = normalizeForXMatch(postedText).slice(0, Math.min(70, normalizeForXMatch(postedText).length));
       if (!currentText || (currentNeedle && !normalizeForXMatch(currentText).includes(currentNeedle))) {
-        await textArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-        await insertXText(page, textArea, postedText);
+        const active = await getActiveXComposerTextArea(page);
+        await active.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+        await insertXText(page, active, postedText);
         await page.waitForTimeout(800);
         const recheck = await readComposerText();
         if (!recheck || (currentNeedle && !normalizeForXMatch(recheck).includes(currentNeedle))) {
@@ -789,7 +814,23 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
     if (!confirmed) {
       const errToast = lastError || await visibleXProblemText(page);
       console.error('[X] Publish diagnostics:', JSON.stringify(await getXDiagnostics(page)));
-      throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. Leaving source files for retry.`);
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'X social post',
+        checkpoint: 'post-submit confirmation',
+        originalError: `X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}.`,
+        submissionAttempted: true,
+        verify: async () => {
+          const check = await waitForXPublishConfirmation(page, textArea, 8000, myHandle);
+          if (check.confirmed) {
+            confirmed = true;
+            publishedUrl = check.url || publishedUrl;
+          }
+          return confirmed;
+        },
+      });
+      if (!arbiter.recovered || !confirmed) {
+        throw new Error(`X did not confirm the post${errToast ? `: ${errToast.trim()}` : ''}. The AI arbiter found no safe automatic recovery. Leaving source files for retry.`);
+      }
     }
 
     const finalUrl = normalizeXStatusUrl(publishedUrl, myHandle)
@@ -805,4 +846,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
   }
 }
 
-module.exports = { uploadToX };
+module.exports = {
+  uploadToX,
+  __test: { getActiveXComposerTextArea, insertXText, verifyXComposerHasText },
+};

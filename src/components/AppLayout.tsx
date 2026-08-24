@@ -314,7 +314,7 @@ export default function AppLayout() {
           <p className="text-xs px-1">
             <span className="block font-medium text-foreground/85">{buildMetaLabel}</span>
             <span className="block text-[10px] text-muted-foreground mt-0.5">
-              {[isCloud ? 'Cloud Mode' : 'Local Mode', isCloud ? 'Cloud DB · Cloud uploads' : 'Cloud DB · Local uploads'].join(' · ')}
+              {[isCloud ? 'Cloud Mode' : 'Local Mode', isCloud ? 'Cloud DB · Cloud uploads' : 'Local SQLite DB · Local uploads'].join(' · ')}
             </span>
           </p>
         </div>

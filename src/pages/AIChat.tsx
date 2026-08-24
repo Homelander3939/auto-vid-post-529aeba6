@@ -562,8 +562,8 @@ export default function AIChat() {
       });
     };
 
-    const contextMsgs: ChatContextMessage[] = appMessages.slice(-20).map((m) => {
-      const base: ChatContextMessage = { role: m.role, content: m.content };
+    const contextMsgs: ChatContextMessage[] = appMessages.slice(-8).map((m) => {
+      const base: ChatContextMessage = { role: m.role, content: m.content.slice(0, 1800) };
       if (m.images) base.images = m.images;
       if (m.files?.some((f) => !f.isImage)) {
         base.files = m.files.filter((f) => !f.isImage).map((f) => ({ name: f.name, type: f.type, size: f.size, textContent: f.textContent }));

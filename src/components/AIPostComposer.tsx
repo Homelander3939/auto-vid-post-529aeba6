@@ -51,6 +51,8 @@ export default function AIPostComposer({ platforms, onUse }: Props) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [imageCredit, setImageCredit] = useState<string>('');
+  const [imageSourceUrl, setImageSourceUrl] = useState<string>('');
+  const [quality, setQuality] = useState<AIGenerateOutput['quality']>(undefined);
   const [activeTab, setActiveTab] = useState<string>('');
   const [meta, setMeta] = useState<{ provider?: string; model?: string }>({});
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -72,7 +74,7 @@ export default function AIPostComposer({ platforms, onUse }: Props) {
 
   const resetState = () => {
     setSteps([]); setPlan(null); setLiveSources([]); setTools([]); setVariants({});
-    setSources([]); setImageUrl(null); setImagePath(null); setImageCredit(''); setMeta({});
+    setSources([]); setImageUrl(null); setImagePath(null); setImageCredit(''); setImageSourceUrl(''); setQuality(undefined); setMeta({});
   };
 
   // Consume a single AIStreamEvent — used both for live SSE and replay from generation_jobs.events
@@ -91,10 +93,11 @@ export default function AIPostComposer({ platforms, onUse }: Props) {
     });
     else if (e.type === 'variant') setVariants((v) => ({ ...v, [e.platform]: { description: e.description, hashtags: e.hashtags } }));
     else if (e.type === 'sources') setSources(e.sources);
-    else if (e.type === 'image') { setImageUrl(e.imageUrl); setImagePath(e.imagePath); setImageCredit((e as any).credit || ''); }
+    else if (e.type === 'image') { setImageUrl(e.imageUrl); setImagePath(e.imagePath); setImageCredit(e.credit || ''); setImageSourceUrl(e.sourceUrl || ''); }
     else if (e.type === 'done') {
       setVariants(e.variants); setSources(e.sources);
-      if (e.imageUrl) { setImageUrl(e.imageUrl); setImagePath(e.imagePath); }
+      if (e.imageUrl) { setImageUrl(e.imageUrl); setImagePath(e.imagePath); setImageCredit(e.imageCredit || ''); setImageSourceUrl(e.imageSourceUrl || ''); }
+      setQuality(e.quality);
       setMeta({ provider: e.provider, model: e.model });
     }
     else if (e.type === 'error') {
@@ -395,8 +398,12 @@ export default function AIPostComposer({ platforms, onUse }: Props) {
 
         {imageUrl && (
           <div className="rounded-lg border bg-card p-4 space-y-2 animate-in fade-in duration-500">
-            <Label className="text-xs uppercase text-muted-foreground">Image{imageCredit ? ` · ${imageCredit}` : ''}</Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-xs uppercase text-muted-foreground">Image{imageCredit ? ` · ${imageCredit}` : ''}</Label>
+              {imageSourceUrl && <a href={imageSourceUrl} target="_blank" rel="noreferrer" className="text-[11px] text-primary hover:underline inline-flex items-center gap-1">Source <ExternalLink className="w-3 h-3" /></a>}
+            </div>
             <img src={imageUrl} alt="" className="rounded-lg max-h-72 object-contain bg-muted w-full" />
+            {quality && <div className="text-[11px] text-muted-foreground">Quality proof: {quality.reachableSources} readable sources · {quality.independentDomains} domains · {quality.groundedFacts} grounded facts · image validated</div>}
           </div>
         )}
 

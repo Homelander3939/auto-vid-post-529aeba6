@@ -26,17 +26,32 @@
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const { ensureSingleLocalLLM } = require('../lm-studio-model-manager');
+const {
+  browserObservationBudget,
+  compactBrowserObservation,
+  normalizePlannedBrowserAction,
+  verifyBrowserCompletion,
+} = require('../agentKernel');
 const { getTikTokPageDescription, isTikTokPublishedUrl, isTikTokUploadUrl } = require('./tiktok-state');
 
 // LM Studio local model configuration
 // Override with env vars: LM_STUDIO_URL, LM_STUDIO_MODEL, LM_STUDIO_API_KEY
 const DEFAULT_LM_STUDIO_URL = 'http://localhost:1234';
-const DEFAULT_LM_STUDIO_MODEL = 'google/gemma-3-27b';
+const DEFAULT_LM_STUDIO_MODEL = 'qwen3.8-27b-uncensored-aggressive';
 
 // Track consecutive LLM failures to reduce log spam
 let _llmConsecutiveFailures = 0;
 // Log the first N failures verbosely, then every Nth failure thereafter to avoid spam
 const LLM_SPAM_THRESHOLD = 3;
+
+function redactAgentLog(value) {
+  return String(value || '')
+    .replace(/(\b(?:password|passcode|api[_ -]?key|(?:access[_ -]?|auth[_ -]?)?token|secret)\s*(?::|=|\bis\b)\s*)["']?[^\s,;"']+/gi, '$1[redacted]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[account]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 /**
  * Returns a user-friendly hint for common LLM connection errors.
@@ -51,7 +66,7 @@ function getLLMErrorHint(err) {
   return '';
 }
 
-function getLmStudioUrl() {
+function getLmStudioBaseUrl() {
   let base = (process.env.LM_STUDIO_URL || DEFAULT_LM_STUDIO_URL).trim().replace(/\/$/, '');
   // Auto-fix missing protocol prefix (common misconfiguration)
   if (base && !base.startsWith('http://') && !base.startsWith('https://')) {
@@ -59,11 +74,15 @@ function getLmStudioUrl() {
   }
   try {
     new URL(base); // throws if URL is still invalid
-    return base + '/v1/chat/completions';
+    return base;
   } catch {
     console.warn(`[SmartAgent] LM_STUDIO_URL "${base}" is not a valid URL, using default (${DEFAULT_LM_STUDIO_URL})`);
-    return DEFAULT_LM_STUDIO_URL + '/v1/chat/completions';
+    return DEFAULT_LM_STUDIO_URL;
   }
+}
+
+function getLmStudioUrl() {
+  return `${getLmStudioBaseUrl()}/v1/chat/completions`;
 }
 
 function getLmStudioModel() {
@@ -80,6 +99,34 @@ function isVisionEnabled() {
   const val = (process.env.LM_STUDIO_VISION || 'true').toLowerCase();
   return val !== 'false' && val !== '0';
 }
+
+const BROWSER_ACTION_TOOL = {
+  type: 'function',
+  function: {
+    name: 'browser_action',
+    description: 'Choose exactly one observable browser action that advances the user goal.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['click', 'fill', 'select', 'press', 'hover', 'check', 'uncheck', 'navigate', 'back', 'reload', 'scroll', 'wait', 'upload_file', 'download', 'done', 'failed'],
+        },
+        ref: { type: 'string', description: 'Fresh element/link reference such as E3 or L2 from the grounded page view.' },
+        selector: { type: 'string', description: 'A selector from the visible interactive-element list.' },
+        value: { type: 'string', description: 'Text, option value, key name, or local file path required by the action.' },
+        url: { type: 'string', description: 'Full HTTP/HTTPS URL for navigate.' },
+        direction: { type: 'string', enum: ['up', 'down'] },
+        amount: { type: 'number' },
+        ms: { type: 'number' },
+        reason: { type: 'string', description: 'One short, user-safe explanation without secrets.' },
+        goalReached: { type: 'boolean' },
+      },
+      required: ['action', 'reason', 'goalReached'],
+      additionalProperties: false,
+    },
+  },
+};
 
 /**
  * Take a screenshot and return as base64
@@ -120,6 +167,11 @@ async function analyzePage(page, context) {
   }
 
   try {
+    const runtime = await ensureSingleLocalLLM({
+      preferredModel: getLmStudioModel(),
+      baseUrl: getLmStudioBaseUrl(),
+      loadIfMissing: true,
+    });
     const response = await fetch(getLmStudioUrl(), {
       method: 'POST',
       headers: {
@@ -127,7 +179,7 @@ async function analyzePage(page, context) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: getLmStudioModel(),
+        model: runtime.modelId,
         messages: [
           {
             role: 'system',
@@ -151,8 +203,9 @@ Respond ONLY with a JSON object:
             content: userContent,
           }
         ],
-        max_tokens: 500,
+        max_tokens: 300,
         temperature: 0.1,
+        reasoning_effort: 'none',
       }),
     });
 
@@ -360,8 +413,8 @@ async function smartFill(page, selectors, value) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Configuration constants for the agentic loop
-const MAX_BODY_TEXT_LENGTH = 1500;
-const MAX_INTERACTIVE_ELEMENTS = 60;
+const MAX_BODY_TEXT_LENGTH = 4500;
+const MAX_INTERACTIVE_ELEMENTS = 80;
 const SELECTOR_WAIT_TIMEOUT = 5000;
 
 /**
@@ -404,27 +457,76 @@ async function extractPageContext(page) {
      */
     function selectorFor(el) {
       const tag = el.tagName.toLowerCase();
-      if (el.id) return `#${CSS.escape(el.id)}`;
-      if (el.name) return `${tag}[name="${el.name}"]`;
-      const label = el.getAttribute('aria-label');
-      if (label) return `${tag}[aria-label="${label}"]`;
-      // Fallback: position-based selector within parent
-      const parent = el.parentElement;
-      if (parent) {
-        const siblings = Array.from(parent.querySelectorAll(tag));
-        const idx = siblings.indexOf(el) + 1;
-        return `${tag}:nth-of-type(${idx})`;
+      const isUnique = (selector) => {
+        try { return document.querySelectorAll(selector).length === 1; } catch { return false; }
+      };
+      const attrValue = (value) => String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      if (el.id) {
+        const selector = `#${CSS.escape(el.id)}`;
+        if (isUnique(selector)) return selector;
       }
-      return tag;
+      for (const attr of ['data-testid', 'name', 'aria-label', 'placeholder', 'href']) {
+        const value = el.getAttribute(attr);
+        if (!value) continue;
+        const selector = `${tag}[${attr}="${attrValue(value)}"]`;
+        if (isUnique(selector)) return selector;
+      }
+
+      // Build a complete parent-qualified path. The old implementation returned
+      // a parent-relative nth-of-type selector without the parent, which could
+      // click the first matching element anywhere on the page.
+      const parts = [];
+      let current = el;
+      while (current && current.nodeType === Node.ELEMENT_NODE) {
+        const currentTag = current.tagName.toLowerCase();
+        if (current.id) {
+          parts.unshift(`#${CSS.escape(current.id)}`);
+          break;
+        }
+        const parent = current.parentElement;
+        let part = currentTag;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter((item) => item.tagName === current.tagName);
+          if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+        parts.unshift(part);
+        const selector = parts.join(' > ');
+        if (isUnique(selector)) return selector;
+        current = parent;
+      }
+      return parts.join(' > ') || tag;
     }
 
     const elements = [];
     const seen = new Set();
     document.querySelectorAll(TAG_SELECTORS).forEach((el) => {
       const rect = el.getBoundingClientRect();
-      const visible = rect.width > 0 && rect.height > 0 &&
-        window.getComputedStyle(el).visibility !== 'hidden' &&
-        window.getComputedStyle(el).display !== 'none';
+      const style = window.getComputedStyle(el);
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+      const clipped = {
+        left: Math.max(0, rect.left),
+        top: Math.max(0, rect.top),
+        right: Math.min(viewportWidth, rect.right),
+        bottom: Math.min(viewportHeight, rect.bottom),
+      };
+      const inViewport = clipped.right > clipped.left && clipped.bottom > clipped.top;
+      const hitPoints = inViewport ? [
+        [0.5, 0.5],
+        [0.25, 0.25],
+        [0.75, 0.25],
+        [0.25, 0.75],
+        [0.75, 0.75],
+      ] : [];
+      const hitVisible = hitPoints.some(([xRatio, yRatio]) => {
+        const x = clipped.left + ((clipped.right - clipped.left) * xRatio);
+        const y = clipped.top + ((clipped.bottom - clipped.top) * yRatio);
+        const hit = document.elementFromPoint(x, y);
+        return Boolean(hit && (hit === el || el.contains(hit)));
+      });
+      const visible = rect.width > 0 && rect.height > 0 && inViewport && hitVisible &&
+        style.visibility !== 'hidden' && style.display !== 'none' &&
+        Number(style.opacity || 1) > 0 && el.getAttribute('aria-hidden') !== 'true';
       if (!visible) return;
 
       const sel = selectorFor(el);
@@ -438,22 +540,39 @@ async function extractPageContext(page) {
         type: el.getAttribute('type') || null,
         placeholder: el.getAttribute('placeholder') || null,
         ariaLabel: el.getAttribute('aria-label') || null,
-        href: el.getAttribute('href') || null,
+        // Resolve relative links now. The agent must never reconstruct a URL
+        // slug from visible text when the browser already knows the exact href.
+        href: el.tagName.toLowerCase() === 'a' ? (el.href || null) : (el.getAttribute('href') || null),
         role: el.getAttribute('role') || null,
         disabled: el.disabled || false,
+        position: `${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)},${Math.round(rect.height)}`,
+        filled: ['input', 'textarea'].includes(el.tagName.toLowerCase())
+          ? Boolean(String(el.value || '').trim())
+          : null,
+        checked: typeof el.checked === 'boolean' ? el.checked : null,
       };
       elements.push(obj);
     });
 
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const landmarks = [...new Set(Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],nav,main,form'))
+      .map((element) => clean(element.getAttribute('aria-label') || element.textContent))
+      .filter(Boolean))].slice(0, 50);
+    const discoveredLinks = [...new Map(Array.from(document.querySelectorAll('a[href]'))
+      .map((element) => ({ href: element.href || '', text: clean(element.textContent || element.getAttribute('aria-label')) }))
+      .filter((item) => /^https?:\/\//i.test(item.href))
+      .map((item) => [item.href, item])).values()].slice(0, 80);
     const bodyText = (document.body?.innerText || '').substring(0, maxBodyLen);
-    return { interactive: elements, bodyText };
-  }, MAX_BODY_TEXT_LENGTH).catch(() => ({ interactive: [], bodyText: '' }));
+    return { interactive: elements, bodyText, landmarks, discoveredLinks };
+  }, MAX_BODY_TEXT_LENGTH).catch(() => ({ interactive: [], bodyText: '', landmarks: [], discoveredLinks: [] }));
 
   return {
     url,
     title,
     interactive: interactive.interactive,
     bodyText: interactive.bodyText,
+    landmarks: interactive.landmarks,
+    discoveredLinks: interactive.discoveredLinks,
   };
 }
 
@@ -477,29 +596,74 @@ async function extractPageContext(page) {
  * @param {import('playwright').Page} page
  * @param {string} goal
  * @param {object[]} history   Previous action objects (for loop-prevention)
- * @param {{ useVision?: boolean }} [opts]
+ * @param {{ useVision?: boolean, screenshotBase64?: string, model?: string, baseUrl?: string, apiKey?: string, nativeApi?: boolean, skipModelGuard?: boolean }} [opts]
  * @returns {Promise<object>}
  */
 async function planNextAction(page, goal, history = [], opts = {}) {
   const ctx = await extractPageContext(page);
   const useVision = opts.useVision !== undefined ? opts.useVision : isVisionEnabled();
+  const observationBudget = browserObservationBudget(goal, history, {
+    vision: useVision,
+    contextLength: opts.contextLength,
+  });
+  const observation = compactBrowserObservation(ctx, goal, history, observationBudget);
+  const attachGrounding = (action) => {
+    if (!action) return action;
+    return {
+      ...action,
+      _groundingContext: {
+        url: ctx.url,
+        title: ctx.title,
+        bodyText: ctx.bodyText,
+        interactive: ctx.interactive.map((element) => ({
+          selector: element.selector,
+          tag: element.tag,
+          type: element.type,
+          text: element.text,
+          ariaLabel: element.ariaLabel,
+          placeholder: element.placeholder,
+          href: element.href,
+        })),
+        discoveredLinks: ctx.discoveredLinks,
+      },
+    };
+  };
+  const useNativeApi = opts.nativeApi === true;
+  const preferredModel = String(opts.model || getLmStudioModel()).trim();
+  const normalizedBaseUrl = String(opts.baseUrl || '').trim().replace(/\/+$/, '').replace(/\/v1$/i, '');
+  const requestApiKey = String(opts.apiKey || getApiKey()).trim() || 'lm-studio';
 
-  // Trim history to last 10 steps to keep prompts manageable
-  const recentHistory = history.slice(-10).map((h, i) => `  Step ${i + 1}: ${h.action} → ${h.reason || ''}`).join('\n');
+  const recentHistory = history.slice(-observationBudget.historySteps).map((h, i) =>
+    `  Step ${i + 1}: ${h.action}${h.selector ? ` selector="${h.selector}"` : ''}${h.ok === true ? ' ok=true' : h.ok === false ? ' ok=false' : ''}${h.stateChanged === true ? ' changed=true' : h.stateChanged === false ? ' changed=false' : ''} → ${redactAgentLog(h.reason || '')}`
+  ).join('\n');
 
-  const systemPrompt = `You are a Playwright browser automation agent.
-Your job is to advance toward the following goal by choosing ONE action per turn.
+  const milestoneRows = observation.progress.rows
+    .map((item) => `  [${item.complete ? 'done' : item.id === observation.progress.current?.id ? 'current' : 'pending'}] ${item.id}: ${item.label}`)
+    .join('\n');
+  const systemPrompt = `You are the decision component inside a deterministic Playwright browser runtime.
+Code owns navigation state, action execution, safety, screenshots, and completion checks. Your only job is to choose ONE grounded next action.
 
 GOAL: ${goal}
 
 PAGE CONTEXT
-  URL   : ${ctx.url}
-  Title : ${ctx.title}
-  Body (truncated): ${ctx.bodyText}
+  URL   : ${observation.url}
+  Title : ${observation.title}
+  Relevant body text: ${observation.bodyText}
+
+TASK MILESTONES (persistent code-owned state):
+${milestoneRows}
+  Current milestone: ${observation.progress.current?.id || 'verify'}
+  Observation mode: ${observationBudget.tier} (failures=${observationBudget.signals.failures}, stalled=${observationBudget.signals.stalled}, rejected=${observationBudget.signals.rejected})
+
+PAGE LANDMARKS:
+${observation.landmarks.map((item) => `  - ${item}`).join('\n') || '  (none found)'}
+
+DISCOVERED PAGE LINKS (exact hrefs; they may be below the current viewport):
+${observation.links.map((item) => `  [${item.ref}] text="${item.text}" href="${item.href}"`).join('\n') || '  (none found)'}
 
 INTERACTIVE ELEMENTS (visible only):
-${ctx.interactive.slice(0, MAX_INTERACTIVE_ELEMENTS).map(e =>
-    `  [${e.tag}] selector="${e.selector}" text="${e.text}" type="${e.type}" placeholder="${e.placeholder}" ariaLabel="${e.ariaLabel}"`
+${observation.elements.map(e =>
+    `  [${e.ref}] [${e.tag}] text="${e.text}" href="${e.href || ''}" position="${e.position || ''}" type="${e.type}" placeholder="${e.placeholder}" ariaLabel="${e.ariaLabel}" filled="${e.filled}" checked="${e.checked}"`
   ).join('\n')}
 
 PREVIOUS STEPS:
@@ -507,7 +671,8 @@ ${recentHistory || '  (none yet)'}
 
 Respond with a JSON object and nothing else:
 {
-  "action":    "click|fill|select|navigate|scroll|wait|upload_file|done|failed",
+  "action":    "click|fill|select|press|hover|check|uncheck|navigate|back|reload|scroll|wait|upload_file|download|done|failed",
+  "ref":       "E1 or L1, or null",
   "selector":  "<CSS selector or null>",
   "value":     "<text to type or option value, or null>",
   "url":       "<full URL for navigate, or null>",
@@ -521,15 +686,27 @@ Respond with a JSON object and nothing else:
 Rules:
 - Use "done" when you are confident the goal has been fully achieved.
 - Use "failed" only when no progress is possible (e.g., captcha, blocked).
-- Prefer selectors from the INTERACTIVE ELEMENTS list above.
+- For a multi-part goal, keep track of every requested result or state and do not use "done" until all parts are visibly verified.
+- Choose a fresh E# or L# reference. Code resolves it to the exact selector or href; do not invent CSS.
+- If the needed control is not currently visible, use an exact DISCOVERED PAGE LINK, a menu/search control, or scroll to the relevant landmark. Never guess the destination.
+- For a requested link or URL, copy an exact absolute href from the INTERACTIVE ELEMENTS list or use the exact current PAGE CONTEXT URL. Never infer, shorten, translate, or reconstruct a URL slug from visible text.
 - Never repeat the exact same action twice in a row.
-- Use "upload_file" when you need to trigger a file upload (click the upload/select button and set the file).`;
+- Never fill an input marked filled="true" unless the goal explicitly asks to replace its existing value.
+- If the previous action says changed=false, inspect the screenshot and choose a different selector or strategy.
+- Use press for keyboard actions such as Enter, Escape, Tab, or ArrowDown.
+- Use hover for menus that reveal controls only after pointer movement.
+- Use back or reload when navigation recovery is necessary.
+- Use upload_file or download only when the goal explicitly requires it.
+- Return exact public facts only when they are present in the current page body, an exact mailto link, or a previously observed verified page. Never return placeholders such as [account].
+- Never claim completion from an action alone: visually verify the requested result on the current page first.
+- Do not plan later actions, explain a tutorial, or repeat the full goal. Choose only the next action for the current milestone.
+- Call the browser_action tool with one action. The JSON format above is a fallback only.`;
 
   // Build user content with optional vision
   let userContent;
   if (useVision) {
     try {
-      const screenshotB64 = await takeScreenshot(page);
+      const screenshotB64 = opts.screenshotBase64 || await takeScreenshot(page);
       userContent = [
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotB64}` } },
         { type: 'text', text: 'What is the next action? Look at the screenshot and the interactive elements listed above.' },
@@ -542,35 +719,87 @@ Rules:
   }
 
   try {
-    const response = await fetch(getLmStudioUrl(), {
+    const guardedBaseUrl = normalizedBaseUrl || getLmStudioBaseUrl();
+    const runtime = opts.skipModelGuard
+      ? { modelId: preferredModel }
+      : await ensureSingleLocalLLM({
+        preferredModel,
+        baseUrl: guardedBaseUrl,
+        loadIfMissing: true,
+      });
+    const requestModel = runtime.modelId || preferredModel;
+    const requestUrl = `${guardedBaseUrl}${useNativeApi ? '/api/v1/chat' : '/v1/chat/completions'}`;
+    const openAIRequest = {
+      model: requestModel,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+      max_tokens: 260,
+      temperature: 0.1,
+      reasoning_effort: 'none',
+      tools: [BROWSER_ACTION_TOOL],
+      tool_choice: 'auto',
+    };
+    const nativeInput = Array.isArray(userContent)
+      ? userContent.map((item) => item.type === 'image_url'
+        ? { type: 'image', data_url: item.image_url.url }
+        : { type: 'text', content: item.text || '' })
+      : [{ type: 'text', content: userContent }];
+    const nativeRequest = {
+      model: requestModel,
+      system_prompt: systemPrompt,
+      input: nativeInput,
+      reasoning: 'off',
+      store: false,
+      max_output_tokens: 400,
+      temperature: 0.1,
+    };
+    const requestHeaders = {
+      'Authorization': `Bearer ${requestApiKey}`,
+      'Content-Type': 'application/json',
+    };
+    let response = await fetch(requestUrl, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${getApiKey()}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: getLmStudioModel(),
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
-        ],
-        max_tokens: 400,
-        temperature: 0.1,
-      }),
+      headers: requestHeaders,
+      body: JSON.stringify(useNativeApi ? nativeRequest : openAIRequest),
     });
+
+    // Some otherwise vision-capable local models expose no native tool-call
+    // parser. Keep the same screenshot-grounded planner and fall back to its
+    // strict JSON contract instead of failing the whole browser session.
+    if (!useNativeApi && !response.ok && [400, 404, 422].includes(response.status)) {
+      const { tools, tool_choice, ...jsonFallbackRequest } = openAIRequest;
+      response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: JSON.stringify(jsonFallbackRequest),
+      });
+    }
 
     if (!response.ok) {
       console.error('[SmartAgent] planNextAction API error:', response.status);
-      return { action: 'failed', reason: `API error ${response.status}`, goalReached: false };
+      return { action: 'failed', reason: `Browser planner API error ${response.status}`, goalReached: false, retryable: true };
     }
 
     const data = await response.json();
-    const text = data.choices?.[0]?.message?.content || '';
+    const message = data.choices?.[0]?.message || {};
+    const toolCall = Array.isArray(message.tool_calls)
+      ? message.tool_calls.find((item) => item?.function?.name === 'browser_action')
+      : null;
+    if (toolCall?.function?.arguments) {
+      const parsed = JSON.parse(toolCall.function.arguments);
+      _llmConsecutiveFailures = 0;
+      return attachGrounding(normalizePlannedBrowserAction(parsed, observation));
+    }
+    const text = useNativeApi
+      ? (data.output || []).filter((item) => item?.type === 'message').map((item) => item.content || '').join('\n')
+      : (message.content || message.reasoning_content || message.reasoning || '');
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
       _llmConsecutiveFailures = 0; // reset on success
-      return parsed;
+      return attachGrounding(normalizePlannedBrowserAction(parsed, observation));
     }
   } catch (err) {
     _llmConsecutiveFailures++;
@@ -581,7 +810,7 @@ Rules:
     }
   }
 
-  return { action: 'failed', reason: 'Could not parse LLM response', goalReached: false };
+  return { action: 'failed', reason: 'Could not parse the browser planner response', goalReached: false, retryable: true };
 }
 
 /**
@@ -589,9 +818,10 @@ Rules:
  *
  * @param {import('playwright').Page} page
  * @param {object} action  Action object from planNextAction
+ * @param {{downloadDir?:string}} [options]
  * @returns {Promise<boolean>}  true if the action was applied successfully
  */
-async function executeAgentAction(page, action) {
+async function executeAgentAction(page, action, options = {}) {
   const { action: type, selector, value, url, direction, amount, ms } = action;
 
   try {
@@ -618,9 +848,38 @@ async function executeAgentAction(page, action) {
         await page.selectOption(selector, value);
         return true;
       }
+      case 'press': {
+        const key = String(value || 'Enter').slice(0, 40);
+        if (selector) await page.locator(selector).press(key);
+        else await page.keyboard.press(key);
+        return true;
+      }
+      case 'hover': {
+        if (!selector) return false;
+        await page.locator(selector).hover({ timeout: SELECTOR_WAIT_TIMEOUT });
+        return true;
+      }
+      case 'check': {
+        if (!selector) return false;
+        await page.locator(selector).check({ timeout: SELECTOR_WAIT_TIMEOUT });
+        return true;
+      }
+      case 'uncheck': {
+        if (!selector) return false;
+        await page.locator(selector).uncheck({ timeout: SELECTOR_WAIT_TIMEOUT });
+        return true;
+      }
       case 'navigate': {
         if (!url) return false;
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        return true;
+      }
+      case 'back': {
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
+        return true;
+      }
+      case 'reload': {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
         return true;
       }
       case 'scroll': {
@@ -660,6 +919,20 @@ async function executeAgentAction(page, action) {
           if (fi) { await fi.setInputFiles(value); return true; }
           return false;
         }
+      }
+      case 'download': {
+        if (!selector) return false;
+        const downloadDir = options.downloadDir || path.join(process.env.USERPROFILE || process.cwd(), 'Downloads');
+        fs.mkdirSync(downloadDir, { recursive: true });
+        const [download] = await Promise.all([
+          page.waitForEvent('download', { timeout: 30000 }),
+          page.locator(selector).click({ timeout: SELECTOR_WAIT_TIMEOUT }),
+        ]);
+        const suggested = String(download.suggestedFilename() || 'download.bin').replace(/[^a-zA-Z0-9._ -]/g, '_');
+        const target = path.join(downloadDir, suggested);
+        await download.saveAs(target);
+        action.downloadPath = target;
+        return true;
       }
       case 'done':
       case 'failed':
@@ -719,148 +992,15 @@ async function detectAndHandleCaptcha(page) {
     return { detected: false, handled: false, reason: 'No CAPTCHA detected' };
   }
 
-  console.log('[SmartAgent] CAPTCHA/robot challenge detected, attempting to solve...');
-
-  // Strategy 1: Click "I'm not a robot" checkbox (reCAPTCHA v2)
-  if (info.hasCheckbox) {
-    try {
-      const clicked = await page.evaluate(() => {
-        const checkbox = document.querySelector('[role="checkbox"], input[type="checkbox"], .recaptcha-checkbox-border');
-        if (checkbox) { checkbox.click(); return true; }
-        return false;
-      });
-      if (clicked) {
-        await page.waitForTimeout(3000);
-        console.log('[SmartAgent] Clicked CAPTCHA checkbox');
-        return { detected: true, handled: true, reason: 'Clicked CAPTCHA checkbox' };
-      }
-
-      // Try clicking inside reCAPTCHA iframe
-      for (const frame of page.frames()) {
-        const frameCheckbox = await frame.$('[role="checkbox"], .recaptcha-checkbox-border, #recaptcha-anchor').catch(() => null);
-        if (frameCheckbox) {
-          await frameCheckbox.click();
-          await page.waitForTimeout(3000);
-          console.log('[SmartAgent] Clicked CAPTCHA checkbox in iframe');
-          return { detected: true, handled: true, reason: 'Clicked CAPTCHA checkbox in iframe' };
-        }
-      }
-    } catch (e) {
-      console.warn('[SmartAgent] Checkbox click failed:', e.message);
-    }
-  }
-
-  // Strategy 2: Click verify/continue button
-  if (info.hasVerifyButton) {
-    try {
-      const clicked = await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button, [role="button"], a');
-        for (const btn of buttons) {
-          const t = (btn.textContent || '').trim().toLowerCase();
-          if (t.includes('verify') || t.includes('continue') || t.includes('confirm') || t.includes('i am human')) {
-            btn.click();
-            return true;
-          }
-        }
-        return false;
-      });
-      if (clicked) {
-        await page.waitForTimeout(3000);
-        console.log('[SmartAgent] Clicked verify/continue button');
-        return { detected: true, handled: true, reason: 'Clicked verify button' };
-      }
-    } catch (e) {
-      console.warn('[SmartAgent] Verify button click failed:', e.message);
-    }
-  }
-
-  // Strategy 3: Use LLM vision to analyze the CAPTCHA and decide what to do
-  if (isVisionEnabled()) {
-    try {
-      const screenshotB64 = await takeScreenshot(page);
-      const ctx = await extractPageContext(page).catch(() => ({ url: page.url(), title: '', interactive: [], bodyText: '' }));
-      
-      const response = await fetch(getLmStudioUrl(), {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${getApiKey()}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: getLmStudioModel(),
-          messages: [
-            {
-              role: 'system',
-              content: `You are a browser automation expert helping to navigate past CAPTCHA/robot verification challenges.
-Analyze the screenshot and page content. Determine the best action to take to pass this verification.
-
-Interactive elements on page:
-${ctx.interactive.slice(0, 30).map(e => `  [${e.tag}] selector="${e.selector}" text="${e.text}"`).join('\n')}
-
-Respond ONLY with JSON:
-{
-  "action": "click|wait|failed",
-  "selector": "<CSS selector to click, or null>",
-  "reason": "brief explanation",
-  "canSolve": true
-}
-
-If you see a simple checkbox ("I'm not a robot"), provide the selector to click it.
-If you see a Cloudflare challenge, try clicking the checkbox or verify button.
-If the challenge requires solving visual puzzles (image selection), respond with action "failed" and canSolve false.`,
-            },
-            {
-              role: 'user',
-              content: [
-                { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotB64}` } },
-                { type: 'text', text: 'What should I do to pass this verification challenge?' },
-              ],
-            },
-          ],
-          max_tokens: 300,
-          temperature: 0.1,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.choices?.[0]?.message?.content || '';
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.action === 'click' && parsed.selector) {
-            try {
-              await page.click(parsed.selector, { timeout: 5000 });
-              await page.waitForTimeout(3000);
-              console.log(`[SmartAgent] LLM-guided CAPTCHA click: ${parsed.selector} — ${parsed.reason}`);
-              return { detected: true, handled: true, reason: `LLM solved: ${parsed.reason}` };
-            } catch (clickErr) {
-              console.warn('[SmartAgent] LLM CAPTCHA click failed:', clickErr.message);
-            }
-          }
-          if (!parsed.canSolve) {
-            console.warn('[SmartAgent] LLM says CAPTCHA cannot be auto-solved:', parsed.reason);
-            return { detected: true, handled: false, reason: `Cannot auto-solve: ${parsed.reason}` };
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[SmartAgent] LLM CAPTCHA analysis failed:', e.message);
-    }
-  }
-
-  // Strategy 4: Wait and hope it auto-resolves (some challenges just need time)
-  await page.waitForTimeout(5000);
-  const stillBlocked = await page.evaluate(() => {
-    const text = (document.body?.innerText || '').toLowerCase();
-    return text.includes('not a robot') || text.includes('verify you are human') || text.includes('captcha');
-  }).catch(() => true);
-
-  if (!stillBlocked) {
-    return { detected: true, handled: true, reason: 'Challenge resolved after waiting' };
-  }
-
-  return { detected: true, handled: false, reason: 'Could not automatically solve CAPTCHA challenge' };
+  // Human-verification challenges are a hard pause. The runtime may capture
+  // and explain the blocker, but it must not click, solve, or ask a model to
+  // bypass CAPTCHA or anti-bot controls.
+  console.log('[SmartAgent] Human verification detected; pausing for user input.');
+  return {
+    detected: true,
+    handled: false,
+    reason: 'Human verification requires the user to complete the challenge in the visible browser.',
+  };
 }
 
 /**
@@ -880,37 +1020,318 @@ If the challenge requires solving visual puzzles (image selection), respond with
  * @param {number}  [options.stepDelayMs=800] Pause between steps (ms)
  * @param {boolean} [options.useVision=false] Attach screenshot to each LLM call
  * @param {boolean} [options.verbose=true]    Log each step to console
+ * @param {boolean} [options.handleCaptchas=true] Try the legacy CAPTCHA helper
+ * @param {Function} [options.onStep]          Observe a completed/planned step
+ * @param {Function} [options.beforeAction]    Guard an action before it executes
+ * @param {number} [options.planTimeoutMs=120000] Maximum time for one LLM decision
  * @returns {Promise<{success:boolean, steps:object[], finalState:string}>}
  */
+async function captureSafePageState(page) {
+  return page.evaluate(() => {
+    const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"],dialog,[aria-modal="true"]'))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })
+      .map((element) => String(element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160))
+      .slice(0, 4);
+    const fields = Array.from(document.querySelectorAll('input,textarea,select'))
+      .slice(0, 80)
+      .map((element) => ({
+        tag: element.tagName.toLowerCase(),
+        type: element.getAttribute('type') || '',
+        name: element.getAttribute('name') || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '',
+        filled: Boolean(String(element.value || '').trim()),
+        checked: typeof element.checked === 'boolean' ? element.checked : null,
+        disabled: Boolean(element.disabled),
+      }));
+    return {
+      url: location.href,
+      title: document.title,
+      scrollX: Math.round(window.scrollX),
+      scrollY: Math.round(window.scrollY),
+      body: String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1800),
+      visibleDialogs,
+      fields,
+    };
+  }).then((state) => JSON.stringify(state)).catch(() => `${page.url()}|unavailable`);
+}
+
+async function dismissStandardConsentOverlay(page) {
+  return page.evaluate(() => {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const exactLabels = /^(?:accept(?: all)?(?: cookies)?|allow all(?: cookies)?|agree(?: and continue)?|i agree|got it|continue without accepting|reject all(?: cookies)?)$/i;
+    const candidates = Array.from(document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"]'));
+    for (const element of candidates) {
+      const label = clean(element.textContent || element.getAttribute('aria-label') || element.getAttribute('value'));
+      if (!exactLabels.test(label)) continue;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') continue;
+      const container = element.closest('[role="dialog"],dialog,[class*="cookie" i],[id*="cookie" i],[class*="consent" i],[id*="consent" i],[class*="privacy" i]');
+      const context = clean(container?.textContent || element.parentElement?.textContent || '').slice(0, 1400);
+      if (!/\b(?:cookie|consent|privacy|tracking|personal data)\b/i.test(context)) continue;
+      element.click();
+      return { clicked: true, label };
+    }
+    return { clicked: false, label: '' };
+  }).catch(() => ({ clicked: false, label: '' }));
+}
+
+function extractHttpUrls(value) {
+  return [...new Set((String(value || '').match(/https?:\/\/[^\s"'<>]+/gi) || [])
+    .map((url) => url.replace(/[),.;\]}]+$/g, ''))
+    .filter(Boolean))];
+}
+
+function normalizeComparableUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    url.hash = '';
+    if (url.pathname !== '/') url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+const PUBLIC_EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+function originalBrowserGoal(goal) {
+  return String(goal || '').split(/\n\nLOCAL VISION BROWSER RULES:/i)[0].trim();
+}
+
+function requestsPublicContactFacts(goal) {
+  const text = String(goal || '');
+  return /\b(?:find|locate|get|extract|identify|show|give|send|tell|collect|look\s*up)\b[\s\S]{0,220}\b(?:public\s+)?(?:contact|support|business|company)?\s*(?:e-?mail|contact\s+(?:info(?:rmation)?|details?|data)|phone|telephone|address|location)\b/i.test(text)
+    || /\b(?:contact\s+(?:info(?:rmation)?|details?|data)|how\s+to\s+contact\s+(?:them|the\s+company|the\s+business))\b/i.test(text);
+}
+
+function extractsEmailSpecifically(goal) {
+  return /\b(?:e-?mail|email address)\b/i.test(String(goal || ''));
+}
+
+function extractGroundedEmails(value) {
+  return [...new Set((String(value || '').match(PUBLIC_EMAIL_PATTERN) || []).map((email) => email.toLowerCase()))];
+}
+
+function extractGroundedPhones(value) {
+  const values = [];
+  for (const match of String(value || '').matchAll(/(?:^|\n|\b)(?:phone|telephone|tel\.?|mobile|whatsapp)\s*[:\-]?\s*(\+?[\d][\d\s().\-]{5,}\d)/gim)) {
+    const phone = String(match[1] || '').trim();
+    const digitCount = phone.replace(/\D/g, '').length;
+    if (digitCount >= 7 && digitCount <= 15) values.push(phone);
+  }
+  for (const match of String(value || '').matchAll(/\+[\d][\d\s().\-]{5,}\d/g)) {
+    const phone = String(match[0] || '').trim();
+    const digitCount = phone.replace(/\D/g, '').length;
+    if (digitCount >= 7 && digitCount <= 15) values.push(phone);
+  }
+  return [...new Set(values)];
+}
+
+function completionGroundingContexts(action = {}, history = []) {
+  const contexts = [...history, action]
+    .map((item) => item?._groundingContext)
+    .filter(Boolean);
+  return contexts.length ? contexts : [action._groundingContext].filter(Boolean);
+}
+
+function validatePublicContactCompletion(goal, action = {}, contexts = []) {
+  const userGoal = originalBrowserGoal(goal);
+  if (!requestsPublicContactFacts(userGoal)) return { allowed: true };
+  const groundingText = contexts.map((context) => [
+    context.bodyText || '',
+    ...(context.interactive || []).map((item) => `${item.text || ''} ${item.href || ''}`),
+    ...(context.discoveredLinks || []).map((item) => `${item.text || ''} ${item.href || ''}`),
+  ].join('\n')).join('\n');
+  const reason = String(action.reason || '');
+  const groundedEmails = extractGroundedEmails(groundingText);
+  const reportedEmails = extractGroundedEmails(reason);
+  const groundedPhones = extractGroundedPhones(groundingText);
+  const reportedPhones = extractGroundedPhones(reason);
+
+  if (reportedEmails.some((email) => !groundedEmails.includes(email))) {
+    return { allowed: false, reason: 'Completion rejected: the reported email was not observed in the live page text or an exact mailto link.' };
+  }
+  const groundedPhoneDigits = new Set(groundedPhones.map((phone) => phone.replace(/\D/g, '')));
+  if (reportedPhones.some((phone) => !groundedPhoneDigits.has(phone.replace(/\D/g, '')))) {
+    return { allowed: false, reason: 'Completion rejected: the reported phone number was not observed in the live page text.' };
+  }
+  if (extractsEmailSpecifically(userGoal) && !reportedEmails.length) {
+    return { allowed: false, reason: groundedEmails.length
+      ? 'Completion rejected: return the exact public email visible on the page instead of a placeholder or description.'
+      : 'Completion rejected: no public email has been grounded yet. Navigate to the contact or support page and inspect it.' };
+  }
+  if (!extractsEmailSpecifically(userGoal) && !reportedEmails.length && !reportedPhones.length) {
+    return { allowed: false, reason: 'Completion rejected: contact information was requested, but no exact grounded email or phone number was reported.' };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Refuse factual URL completion unless every reported URL is grounded in the
+ * live page. Same-origin links are also fetched through the browser context so
+ * a guessed but dead route can never be returned as a successful result.
+ */
+async function validateAgentCompletion(page, goal, action = {}, history = []) {
+  const userGoal = originalBrowserGoal(goal);
+  const observedContext = action._groundingContext || (page ? await extractPageContext(page) : null);
+  const groundedAction = observedContext && !action._groundingContext ? { ...action, _groundingContext: observedContext } : action;
+  const contexts = completionGroundingContexts(groundedAction, history);
+  const typedValidation = verifyBrowserCompletion({ goal: userGoal, action: groundedAction, history, contexts });
+  if (!typedValidation.allowed) return { ...typedValidation, verifiedLinks: [] };
+  const contactValidation = validatePublicContactCompletion(userGoal, groundedAction, contexts);
+  const checks = [...typedValidation.checks];
+  const contactCheck = typedValidation.contract.checks.find((item) => item.id === 'public-contact');
+  if (!contactValidation.allowed) {
+    if (contactCheck) checks.push({ ...contactCheck, passed: false, detail: contactValidation.reason });
+    return { ...contactValidation, contract: typedValidation.contract, checks, verifiedLinks: [] };
+  }
+  if (contactCheck) checks.push({ ...contactCheck, passed: true, detail: 'Exact requested contact values were grounded in the live page.' });
+  if (!/\b(?:link|url)\b/i.test(userGoal)) return { ...typedValidation, checks, allowed: true, verifiedLinks: [] };
+
+  const reported = [...new Set([
+    ...extractHttpUrls(groundedAction.reason),
+    ...extractHttpUrls(groundedAction.url),
+    ...extractHttpUrls(groundedAction.value),
+  ].map(normalizeComparableUrl).filter(Boolean))];
+  if (!reported.length) {
+    const exactLinkCheck = typedValidation.contract.checks.find((item) => item.id === 'exact-link');
+    return {
+      allowed: false,
+      reason: 'Completion rejected: the requested link was not reported. Read and return one exact visible DOM href.',
+      contract: typedValidation.contract,
+      checks: exactLinkCheck ? [...checks, { ...exactLinkCheck, passed: false, detail: 'No URL was reported.' }] : checks,
+      verifiedLinks: [],
+    };
+  }
+
+  // Validate against the exact DOM snapshot that accompanied the vision frame.
+  // Animated carousels can change between the screenshot request and the LLM
+  // response, so re-reading only the later frame would reject a real link.
+  const currentContext = groundedAction._groundingContext || await extractPageContext(page);
+  const currentUrl = normalizeComparableUrl(currentContext.url);
+  const grounded = new Map();
+  for (const context of contexts.length ? contexts : [currentContext]) {
+    for (const element of [...(context.interactive || []), ...(context.discoveredLinks || [])]) {
+      const url = normalizeComparableUrl(element.href);
+      if (url) grounded.set(url, { url, text: String(element.text || '').trim() });
+    }
+    const contextUrl = normalizeComparableUrl(context.url);
+    if (contextUrl) grounded.set(contextUrl, { url: contextUrl, text: String(context.title || '').trim() });
+  }
+
+  const verifiedLinks = [];
+  for (const url of reported) {
+    const exact = grounded.get(url);
+    if (!exact) {
+      return {
+        allowed: false,
+        reason: 'Completion rejected: the reported URL is not an exact visible DOM href or the current page URL. Inspect the fresh page and copy an exact href.',
+        verifiedLinks: [],
+      };
+    }
+
+    try {
+      const pageOrigin = currentUrl ? new URL(currentUrl).origin : '';
+      if (new URL(url).origin === pageOrigin) {
+        const response = await page.context().request.get(url, {
+          failOnStatusCode: false,
+          timeout: 12_000,
+        });
+        if (response.status() >= 400) {
+          return {
+            allowed: false,
+            reason: `Completion rejected: the exact page link returned HTTP ${response.status()}. Choose another live visible href.`,
+            verifiedLinks: [],
+          };
+        }
+      }
+    } catch (error) {
+      return {
+        allowed: false,
+        reason: `Completion rejected: the reported link could not be verified (${String(error.message || error).slice(0, 160)}).`,
+        verifiedLinks: [],
+      };
+    }
+    verifiedLinks.push(exact);
+  }
+
+  const exactLinkCheck = typedValidation.contract.checks.find((item) => item.id === 'exact-link');
+  if (exactLinkCheck) checks.push({ ...exactLinkCheck, passed: true, detail: `${verifiedLinks.length} exact live URL(s) verified.` });
+  return { ...typedValidation, checks, allowed: true, verifiedLinks };
+}
+
 async function runAgentTask(page, goal, options = {}) {
   const {
     maxSteps = 15,
     stepDelayMs = 800,
     useVision = isVisionEnabled(),
     verbose = true,
+    handleCaptchas = true,
+    onStep = null,
+    onObserve = null,
+    onRuntime = null,
+    beforeAction = null,
+    planTimeoutMs = 120_000,
+    downloadDir = null,
+    initialHistory = [],
   } = options;
 
-  const history = [];
+  const history = (Array.isArray(initialHistory) ? initialHistory : []).slice(-24).map((item) => ({ ...item }));
+  const stepOffset = history.reduce((max, item) => Math.max(max, Number(item?.step || 0)), 0);
   let success = false;
   let finalState = 'incomplete';
+  let visionFrames = 0;
+  let plannerCalls = 0;
+  let actionAttempts = 0;
+  let stalledActions = 0;
+  let rejectedCompletions = 0;
+  const startedAt = Date.now();
+  let activePage = page;
+  const baseUrl = getLmStudioBaseUrl();
+  const runtime = await ensureSingleLocalLLM({
+    preferredModel: getLmStudioModel(),
+    baseUrl,
+    loadIfMissing: true,
+  });
+  if (!runtime.ready || !runtime.modelId) throw new Error('No local browser-agent model is ready in LM Studio.');
+  const visionActive = Boolean(useVision && runtime.vision !== false);
+  if (typeof onRuntime === 'function') await onRuntime({ ...runtime, visionActive });
 
-  if (verbose) console.log(`[AgentTask] Goal: "${goal}"`);
+  if (verbose) console.log(`[AgentTask] Goal received (${String(goal || '').length} characters): "${redactAgentLog(goal).slice(0, 240)}"`);
 
-  for (let step = 1; step <= maxSteps; step++) {
-    // Give the page a moment to settle before planning
-    await page.waitForTimeout(stepDelayMs).catch(() => {});
+  for (let iteration = 1; iteration <= maxSteps; iteration++) {
+    const step = stepOffset + iteration;
+    await activePage.waitForTimeout(stepDelayMs).catch(() => {});
 
-    // Check for CAPTCHA/robot challenges before planning the next action
-    let captchaHandled = false;
+    let screenshotBase64 = null;
+    if (visionActive) screenshotBase64 = await takeScreenshot(activePage).catch(() => null);
+    if (screenshotBase64) visionFrames += 1;
+    if (typeof onObserve === 'function') {
+      await onObserve({
+        action: 'observe',
+        reason: visionActive ? 'Captured the current page for visual planning.' : 'Read the current page structure for planning.',
+        step,
+        ok: true,
+        phase: 'before',
+      }, activePage, history, screenshotBase64);
+    }
+
     try {
-      const captchaCheck = await detectAndHandleCaptcha(page);
-      if (captchaCheck.detected) {
-        if (verbose) console.log(`[AgentTask] Step ${step}: CAPTCHA/robot check detected — attempting to solve...`);
-        captchaHandled = captchaCheck.handled;
-        if (captchaHandled) {
-          if (verbose) console.log('[AgentTask] CAPTCHA challenge resolved, continuing...');
-          history.push({ action: 'captcha_solve', reason: 'Solved CAPTCHA/robot challenge', step });
-          await page.waitForTimeout(2000);
+      if (handleCaptchas) {
+        const captchaCheck = await detectAndHandleCaptcha(activePage);
+        if (captchaCheck.detected && !captchaCheck.handled) {
+          const reason = 'Human verification is visible and needs user input before the browser can continue.';
+          history.push({ action: 'blocked', reason, step, ok: false });
+          finalState = 'blocked';
+          if (typeof onStep === 'function') await onStep({ action: 'blocked', reason, step, ok: false, terminal: true }, activePage, history);
+          break;
+        }
+        if (captchaCheck.detected && captchaCheck.handled) {
+          history.push({ action: 'captcha_solve', reason: captchaCheck.reason, step, ok: true });
           continue;
         }
       }
@@ -918,49 +1339,199 @@ async function runAgentTask(page, goal, options = {}) {
       if (verbose) console.warn('[AgentTask] CAPTCHA detection error:', err.message);
     }
 
+    const consent = await dismissStandardConsentOverlay(activePage);
+    if (consent.clicked) {
+      const automatic = {
+        action: 'auto_consent',
+        reason: `Dismissed the standard consent overlay using “${consent.label}”.`,
+        step,
+        ok: true,
+        stateChanged: true,
+      };
+      history.push(automatic);
+      if (typeof onStep === 'function') await onStep(automatic, activePage, history);
+      continue;
+    }
+
     let action;
+    let planTimer;
     try {
-      action = await planNextAction(page, goal, history, { useVision });
+      plannerCalls += 1;
+      action = await Promise.race([
+        planNextAction(activePage, goal, history, {
+          useVision: visionActive,
+          screenshotBase64,
+          model: runtime.modelId,
+          baseUrl,
+          skipModelGuard: true,
+          contextLength: runtime.contextLength,
+        }),
+        new Promise((_, reject) => {
+          planTimer = setTimeout(() => reject(new Error(`Browser AI decision timed out after ${Math.round(planTimeoutMs / 1000)} seconds`)), planTimeoutMs);
+        }),
+      ]);
     } catch (err) {
-      console.error('[AgentTask] planNextAction threw:', err.message);
-      finalState = 'error';
-      break;
+      const reason = `Browser planning failed: ${err.message}`;
+      history.push({ action: 'observe', reason, step, ok: false });
+      if (typeof onStep === 'function') await onStep({ action: 'observe', reason, step, ok: false }, activePage, history);
+      if (iteration >= maxSteps) finalState = 'error';
+      continue;
+    } finally {
+      if (planTimer) clearTimeout(planTimer);
     }
 
     if (verbose) {
-      console.log(`[AgentTask] Step ${step}/${maxSteps}: ${action.action}` +
+      console.log(`[AgentTask] Step ${iteration}/${maxSteps} (overall ${step}): ${action.action}` +
         (action.selector ? ` selector="${action.selector}"` : '') +
-        (action.value ? ` value="${action.value}"` : '') +
+        (action.value ? ' value=[redacted input]' : '') +
         (action.url ? ` url="${action.url}"` : '') +
-        ` | ${action.reason || ''}`);
+        ` | ${redactAgentLog(action.reason || '')}`);
+    }
+
+    if (action.action === 'failed' && action.retryable && iteration < maxSteps) {
+      const retry = { ...action, action: 'observe', step, ok: false };
+      history.push(retry);
+      if (typeof onStep === 'function') await onStep(retry, activePage, history);
+      continue;
+    }
+
+    const repeatedSuccessfulFill = action.action === 'fill' && action.selector
+      && history.some((item) => item.action === 'fill' && item.selector === action.selector && item.ok === true);
+    if (repeatedSuccessfulFill) {
+      const observation = {
+        action: 'observe',
+        selector: action.selector,
+        reason: 'This field was already filled successfully. Choose a different incomplete field or continue to the next action.',
+        step,
+        ok: true,
+      };
+      history.push(observation);
+      if (typeof onStep === 'function') await onStep(observation, activePage, history);
+      continue;
+    }
+
+    const actionSignature = JSON.stringify({
+      action: action.action,
+      selector: action.selector || '',
+      value: action.value || '',
+      url: action.url || '',
+      direction: action.direction || '',
+    });
+    const repeatedStalledAction = history.slice(-4).some((item) => item.stateChanged === false
+      && JSON.stringify({
+        action: item.action,
+        selector: item.selector || '',
+        value: item.value || '',
+        url: item.url || '',
+        direction: item.direction || '',
+      }) === actionSignature);
+    if (repeatedStalledAction) {
+      stalledActions += 1;
+      const observation = {
+        action: 'observe',
+        reason: 'That strategy already produced no visible change. Inspect the current screenshot, landmarks, and exact discovered links, then choose a different grounded action.',
+        step,
+        ok: false,
+      };
+      history.push(observation);
+      if (typeof onStep === 'function') await onStep(observation, activePage, history);
+      continue;
     }
 
     history.push({ ...action, step });
 
-    if (action.action === 'done' || action.goalReached) {
+    if (action.action === 'done') {
+      const completion = await validateAgentCompletion(activePage, goal, action, history);
+      if (!completion.allowed) {
+        rejectedCompletions += 1;
+        const rejected = {
+          action: 'observe',
+          reason: completion.reason,
+          step,
+          ok: false,
+          completionRejected: true,
+        };
+        history[history.length - 1] = rejected;
+        if (typeof onStep === 'function') await onStep(rejected, activePage, history);
+        if (verbose) console.warn(`[AgentTask] ${completion.reason}`);
+        continue;
+      }
+      const completedAction = {
+        ...action,
+        verifiedLinks: completion.verifiedLinks,
+        verification: { contract: completion.contract, checks: completion.checks },
+        step,
+        ok: true,
+        terminal: true,
+      };
+      history[history.length - 1] = completedAction;
       success = true;
       finalState = 'done';
-      if (verbose) console.log('[AgentTask] Goal reached!');
+      if (typeof onStep === 'function') await onStep(completedAction, activePage, history);
       break;
     }
 
     if (action.action === 'failed') {
       finalState = 'failed';
-      if (verbose) console.log('[AgentTask] Agent reported failure:', action.reason);
+      if (typeof onStep === 'function') await onStep({ ...action, step, ok: false, terminal: true }, activePage, history);
       break;
     }
 
-    const ok = await executeAgentAction(page, action);
-    if (!ok) {
-      if (verbose) console.warn(`[AgentTask] Step ${step} action could not be executed, continuing…`);
+    if (typeof beforeAction === 'function') {
+      const verdict = await beforeAction(action, activePage, history);
+      if (verdict === false || verdict?.allowed === false) {
+        const reason = typeof verdict === 'object' && verdict?.reason
+          ? String(verdict.reason)
+          : 'Action blocked by the browser safety policy';
+        history.push({ action: 'blocked', reason, step, ok: false });
+        finalState = 'blocked';
+        if (typeof onStep === 'function') await onStep({ action: 'blocked', reason, step, ok: false, terminal: true }, activePage, history);
+        break;
+      }
     }
+
+    const beforeState = await captureSafePageState(activePage);
+    const browserContext = activePage.context();
+    actionAttempts += 1;
+    const ok = await executeAgentAction(activePage, action, { downloadDir });
+    await activePage.waitForTimeout(400).catch(() => {});
+    const openPages = browserContext.pages().filter((candidate) => !candidate.isClosed());
+    const newestPage = openPages[openPages.length - 1];
+    if (newestPage && newestPage !== activePage) {
+      activePage = newestPage;
+      await activePage.bringToFront().catch(() => {});
+      await activePage.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    }
+    const afterState = await captureSafePageState(activePage);
+    const stateChanged = Boolean(ok && (beforeState !== afterState || action.downloadPath));
+    const recorded = { ...action, step, ok, stateChanged };
+    history[history.length - 1] = recorded;
+    if (typeof onStep === 'function') await onStep(recorded, activePage, history);
+    if (!ok && verbose) console.warn(`[AgentTask] Step ${step} action could not be executed; the next visual observation will choose another strategy.`);
   }
 
-  if (finalState === 'incomplete') {
-    if (verbose) console.warn(`[AgentTask] Step budget (${maxSteps}) exhausted without completion.`);
-  }
-
-  return { success, steps: history, finalState };
+  if (finalState === 'incomplete' && verbose) console.warn(`[AgentTask] Step budget (${maxSteps}) exhausted without completion.`);
+  return {
+    success,
+    steps: history,
+    finalState,
+    page: activePage,
+    runtime: {
+      modelId: runtime.modelId,
+      modelKey: runtime.modelKey,
+      contextLength: runtime.contextLength || null,
+      vision: visionActive,
+      visionFrames,
+      toolUse: runtime.toolUse === true,
+      metrics: {
+        plannerCalls,
+        actionAttempts,
+        stalledActions,
+        rejectedCompletions,
+        elapsedMs: Date.now() - startedAt,
+      },
+    },
+  };
 }
 
 module.exports = {
@@ -977,5 +1548,8 @@ module.exports = {
   planNextAction,
   executeAgentAction,
   runAgentTask,
+  validateAgentCompletion,
   detectAndHandleCaptcha,
+  redactAgentLog,
+  dismissStandardConsentOverlay,
 };

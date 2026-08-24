@@ -345,6 +345,10 @@ async function processSocialPost(supabase, postId, notify) {
 
 async function pollDueSocialPosts(supabase, notify) {
   try {
+    // Browser-profile uploads are intentionally serialized. Starting several
+    // X/LinkedIn/Facebook sessions together makes the PC unusable and causes
+    // profiles to contend with one another.
+    if (processing.size > 0) return;
     const now = new Date().toISOString();
     const { data: due } = await supabase
       .from('social_posts')
@@ -352,11 +356,9 @@ async function pollDueSocialPosts(supabase, notify) {
       .in('status', ['pending', 'scheduled'])
       .or(`scheduled_at.is.null,scheduled_at.lte.${now}`)
       .limit(5);
-    for (const post of (due || [])) {
-      if (processing.has(post.id)) continue;
-      processSocialPost(supabase, post.id, notify).catch((e) =>
-        console.error(`[SocialPosts] ${post.id} error:`, e.message));
-    }
+    const post = (due || []).find((candidate) => !processing.has(candidate.id));
+    if (!post) return;
+    await processSocialPost(supabase, post.id, notify);
   } catch (e) {
     console.error('[SocialPosts] poll error:', e.message);
   }

@@ -38,7 +38,7 @@ async function sendChatActionViaBotToken(botToken, chatId, action = 'typing') {
   return data;
 }
 
-async function sendPhotoViaBotToken(botToken, chatId, photoBuffer, caption = '') {
+async function sendPhotoViaBotToken(botToken, chatId, photoBuffer, caption = '', options = {}) {
   if (!botToken) throw new Error('Telegram bot token is required');
   if (typeof globalThis.fetch !== 'function' || typeof FormData === 'undefined' || typeof Blob === 'undefined') {
     throw new Error('Direct photo upload requires Node 18+ fetch/FormData support');
@@ -46,7 +46,12 @@ async function sendPhotoViaBotToken(botToken, chatId, photoBuffer, caption = '')
   const form = new FormData();
   form.append('chat_id', String(chatId));
   if (caption) form.append('caption', caption);
-  form.append('photo', new Blob([photoBuffer], { type: 'image/png' }), 'photo.png');
+  const mimeType = /^image\/(?:jpeg|jpg|png|webp)$/i.test(String(options.mimeType || ''))
+    ? String(options.mimeType).toLowerCase().replace('image/jpg', 'image/jpeg')
+    : 'image/jpeg';
+  const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
+  const fileName = String(options.fileName || `photo.${extension}`).replace(/[^a-zA-Z0-9._-]/g, '-');
+  form.append('photo', new Blob([photoBuffer], { type: mimeType }), fileName);
   const res = await globalThis.fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, { method: 'POST', body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
@@ -95,29 +100,33 @@ async function sendTelegram(botToken, chatId, message, backend) {
   });
 }
 
-async function sendTelegramPhoto(botToken, chatId, photoBuffer, caption = '', backend) {
+async function sendTelegramPhoto(botToken, chatId, photoBuffer, caption = '', backend, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   if (!normalizedChatId || !photoBuffer) return null;
 
   if (botToken) {
     try {
-      return await sendPhotoViaBotToken(botToken, normalizedChatId, photoBuffer, caption);
+      const result = await sendPhotoViaBotToken(botToken, normalizedChatId, photoBuffer, caption, options);
+      return { ...result, deliveryKind: 'photo', photoSent: true };
     } catch (e) {
       console.warn('[Telegram] Direct bot photo send failed, trying edge-function fallback...');
     }
   }
 
   if (backend?.supabaseUrl && backend?.supabaseKey) {
-    return sendViaEdgeFunction({
+    const result = await sendViaEdgeFunction({
       chat_id: normalizedChatId,
       text: caption,
       photo_base64: Buffer.from(photoBuffer).toString('base64'),
-      photo_mime_type: 'image/png',
+      photo_mime_type: options.mimeType || 'image/jpeg',
     }, backend);
+    return { ...result, deliveryKind: 'photo', photoSent: true };
   }
 
-  // If edge fallback is unavailable, at least send a text notification.
-  return sendTelegram(botToken, normalizedChatId, `${caption}\n\n(Preview image unavailable in current local setup)`, backend);
+  // A text notice is useful, but it must never be reported as a successful
+  // photo delivery. Callers can now fail or retry the image contract honestly.
+  const result = await sendTelegram(botToken, normalizedChatId, `${caption}\n\n(Preview image unavailable in current local setup)`, backend);
+  return { ...(result || {}), deliveryKind: 'text', photoSent: false };
 }
 
 module.exports = { sendTelegram, sendTelegramPhoto, sendChatActionViaBotToken };

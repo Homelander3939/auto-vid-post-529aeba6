@@ -16,7 +16,7 @@ interface Skill {
   name: string;
   slug: string;
   description: string;
-  source: 'manual' | 'github' | 'learned';
+  source: string;
   source_url?: string;
   triggers: string[];
   steps: SkillStep[];
@@ -26,6 +26,8 @@ interface Skill {
   use_count: number;
   last_used_at?: string;
   created_at: string;
+  risk_level?: 'read-only' | 'guarded-write' | 'guided';
+  required_inputs?: string[];
 }
 
 interface SkillStep {
@@ -66,6 +68,54 @@ const DEFAULT_MEMORY_IMPORTANCE = 60;
 const MIN_MEMORY_IMPORTANCE = 1;
 const MAX_MEMORY_IMPORTANCE = 100;
 
+function arrayValue<T = unknown>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (value === null || value === undefined || value === '') return [];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed as T[] : [parsed as T];
+    } catch {
+      return value.split(',').map((item) => item.trim()).filter(Boolean) as T[];
+    }
+  }
+  return [value as T];
+}
+
+function normalizeSkill(row: any): Skill {
+  return {
+    ...row,
+    id: String(row?.id || ''),
+    name: String(row?.name || row?.title || row?.slug || 'Untitled local skill'),
+    slug: String(row?.slug || row?.id || 'local-skill'),
+    description: String(row?.description || ''),
+    source: String(row?.source || 'manual'),
+    triggers: arrayValue<string>(row?.triggers).map(String),
+    steps: arrayValue<SkillStep>(row?.steps).map((step) => typeof step === 'string' ? { note: step } : (step || {})),
+    system_prompt: String(row?.system_prompt || row?.instructions || ''),
+    tags: arrayValue<string>(row?.tags).map(String),
+    enabled: row?.enabled !== false,
+    use_count: Number(row?.use_count || 0),
+    created_at: String(row?.created_at || ''),
+    risk_level: row?.risk_level || 'guided',
+    required_inputs: arrayValue<string>(row?.required_inputs).map(String),
+  };
+}
+
+function normalizeMemory(row: any): AgentMemory {
+  return {
+    ...row,
+    id: String(row?.id || ''),
+    title: String(row?.title || row?.key || 'Recovered local memory'),
+    content: String(row?.content || ''),
+    memory_type: String(row?.memory_type || row?.status || 'fact'),
+    tags: arrayValue<string>(row?.tags).map(String),
+    enabled: row?.enabled !== false,
+    use_count: Number(row?.use_count || 0),
+    created_at: String(row?.created_at || ''),
+  };
+}
+
 function clampImportance(value: number) {
   return Math.min(Math.max(Number(value) || DEFAULT_MEMORY_IMPORTANCE, MIN_MEMORY_IMPORTANCE), MAX_MEMORY_IMPORTANCE);
 }
@@ -96,9 +146,15 @@ export default function AgentSkills() {
       supabase.from('agent_memories').select('*').order('importance', { ascending: false }).order('created_at', { ascending: false }).limit(30),
       supabase.from('agent_runs').select('id,prompt,pending_skill,created_at').not('pending_skill', 'is', null).order('created_at', { ascending: false }).limit(20),
     ]);
-    setSkills((s.data as Skill[]) || []);
-    setMemories((m.data as AgentMemory[]) || []);
-    setPending((p.data as PendingRun[]) || []);
+    setSkills(((s.data as any[]) || []).map(normalizeSkill));
+    setMemories(((m.data as any[]) || []).map(normalizeMemory));
+    setPending(((p.data as any[]) || []).map((row) => ({
+      ...row,
+      id: String(row?.id || ''),
+      prompt: String(row?.prompt || ''),
+      pending_skill: row?.pending_skill && typeof row.pending_skill === 'object' ? row.pending_skill : null,
+      created_at: String(row?.created_at || ''),
+    })));
     setLoading(false);
   };
 
@@ -221,7 +277,7 @@ export default function AgentSkills() {
         body: { action: 'run_skill', skillId: id },
       });
       if (error || data?.error) throw new Error(data?.error || error?.message);
-      toast.success('Skill running — open AI Chat to watch live progress.');
+      toast.success(String(data?.summary || 'Skill completed locally.').slice(0, 220));
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Failed to run skill');
     } finally {
@@ -268,6 +324,11 @@ export default function AgentSkills() {
       triggers: draft.triggers.split(',').map((t: string) => t.trim()).filter(Boolean),
       system_prompt: draft.system_prompt,
       steps: parsedSteps,
+      tags: [],
+      enabled: true,
+      use_count: 0,
+      risk_level: 'guided',
+      required_inputs: [],
     });
     if (error) { toast.error(error.message); return; }
     toast.success('Skill created');
@@ -304,7 +365,7 @@ export default function AgentSkills() {
             <Sparkles className="w-6 h-6 text-primary" /> Agent Skills
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Reusable routines the agent can run. Install from GitHub, write your own, or let the agent propose them after it learns a workflow.
+            Reusable routines the agent can run. Every enabled skill, its triggers, required inputs, purpose, and mapped tool are included in the agent’s fresh AI Chat and Telegram context.
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -324,7 +385,7 @@ export default function AgentSkills() {
           <h2 className="text-sm font-medium">Install from link or file</h2>
         </div>
         <p className="text-xs text-muted-foreground mb-3">
-          Paste a GitHub repo, a GitHub/raw file URL, or any direct remote skill file. You can also import a single local skill file or a ZIP bundle. The importer scans common layouts such as <code className="text-[10px] bg-secondary px-1 rounded">skill.json</code>, <code className="text-[10px] bg-secondary px-1 rounded">skills/</code>, <code className="text-[10px] bg-secondary px-1 rounded">agents/</code>, <code className="text-[10px] bg-secondary px-1 rounded">commands/</code>, and Claude/OpenClaw/Hermes prompt files.
+          Paste a GitHub repo, a GitHub/raw file URL, or any direct remote skill file. Large GitHub repositories are scanned through their file tree, so models, binaries, media, caches, and unrelated source files are skipped instead of rejecting the whole repository by ZIP size. You can also import a local skill file or ZIP bundle. The importer recognizes <code className="text-[10px] bg-secondary px-1 rounded">SKILL.md</code>, <code className="text-[10px] bg-secondary px-1 rounded">skills/</code>, <code className="text-[10px] bg-secondary px-1 rounded">agents/</code>, <code className="text-[10px] bg-secondary px-1 rounded">commands/</code>, and Claude/OpenClaw/Hermes prompt files.
         </p>
         <div className="flex gap-2 flex-wrap">
           <Input
@@ -365,7 +426,7 @@ export default function AgentSkills() {
           </Button>
         </div>
         <p className="text-[11px] text-muted-foreground mt-2">
-          If a link import fails, try uploading the raw skill file or a ZIP export instead.
+          Imported instructions use the app’s existing allowlisted tools. A skill that requires an external CLI or model is marked as guided until that runtime is installed separately.
         </p>
       </Card>
 
@@ -466,7 +527,10 @@ export default function AgentSkills() {
                   <div className="font-medium text-sm flex items-center gap-1.5 min-w-0">
                     <span className="truncate">{sk.name}</span>
                   </div>
-                  <Badge variant="outline" className="text-[9px] shrink-0">{sk.source}</Badge>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Badge variant="outline" className="text-[9px]">{sk.risk_level}</Badge>
+                    <Badge variant="outline" className="text-[9px]">{sk.source}</Badge>
+                  </div>
                 </div>
                 <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{sk.description || 'No description'}</p>
                 {sk.triggers.length > 0 && (
@@ -480,8 +544,17 @@ export default function AgentSkills() {
                   {sk.steps.length} steps · used {sk.use_count} times
                 </div>
                 <div className="mt-auto flex items-center gap-2">
-                  <Button size="sm" className="flex-1" onClick={() => runSkill(sk.id)} disabled={running === sk.id || !sk.enabled}>
-                    {running === sk.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><Play className="w-3.5 h-3.5 mr-1" /> Run</>}
+                  <Button
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => sk.required_inputs?.length
+                      ? toast.info(`Use AI Chat and provide: ${sk.required_inputs.join(', ')}`)
+                      : runSkill(sk.id)}
+                    disabled={running === sk.id || !sk.enabled}
+                  >
+                    {running === sk.id
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : <><Play className="w-3.5 h-3.5 mr-1" /> {sk.required_inputs?.length ? 'Use in Chat' : 'Test'}</>}
                   </Button>
                   <Switch checked={sk.enabled} onCheckedChange={(v) => toggleEnabled(sk.id, v)} />
                   <Button size="icon" variant="ghost" onClick={() => remove(sk.id)}>

@@ -1,19 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
+import path from 'node:path';
 
 import { hasMissingDependency, needsInstall } from '../../scripts/ensure-deps.mjs';
 
 describe('hasMissingDependency', () => {
   it('returns true when a dependency folder is missing', () => {
-    const pathExists = vi.fn((targetPath: string) => targetPath !== '/repo/node_modules/jszip');
+    const modulesPath = path.join(path.parse(process.cwd()).root, 'repo', 'node_modules');
+    const pathExists = vi.fn((targetPath: string) => targetPath !== path.join(modulesPath, 'jszip'));
 
-    expect(hasMissingDependency({ jszip: '^3.10.1' }, '/repo/node_modules', pathExists)).toBe(true);
+    expect(hasMissingDependency({ jszip: '^3.10.1' }, modulesPath, pathExists)).toBe(true);
   });
 
   it('handles scoped package names', () => {
     const pathExists = vi.fn(() => true);
+    const modulesPath = path.join(path.parse(process.cwd()).root, 'repo', 'node_modules');
 
-    expect(hasMissingDependency({ '@scope/pkg': '1.0.0' }, '/repo/node_modules', pathExists)).toBe(false);
-    expect(pathExists).toHaveBeenCalledWith('/repo/node_modules/@scope/pkg');
+    expect(hasMissingDependency({ '@scope/pkg': '1.0.0' }, modulesPath, pathExists)).toBe(false);
+    expect(pathExists).toHaveBeenCalledWith(path.join(modulesPath, '@scope/pkg'));
   });
 
   it('treats missing dependency metadata as no missing packages', () => {

@@ -10,6 +10,15 @@ describe('agentChat helpers', () => {
     expect(shouldLaunchAgentRun('Suggest three hashtags for my next TikTok post.')).toBe(false);
   });
 
+  it('routes direct browser requests through fast chat tools instead of a generic agent run', () => {
+    expect(shouldLaunchAgentRun('Use the local browser to open my calendar and add an event.')).toBe(false);
+    expect(shouldLaunchAgentRun('use localc browser, go to example.com and inspect the page')).toBe(false);
+  });
+
+  it('does not treat length alone as autonomous-agent intent', () => {
+    expect(shouldLaunchAgentRun(`Explain the current uploader status clearly. ${'Please stay concise. '.repeat(20)}`)).toBe(false);
+  });
+
   it('does not force agent mode for unrelated short research phrasing', () => {
     expect(shouldLaunchAgentRun('Can you research three hashtags for this post?')).toBe(false);
   });

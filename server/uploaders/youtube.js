@@ -7,6 +7,7 @@ const { smartClick, smartFill, waitForStateChange, analyzePage } = require('./sm
 const { getSharedBrowserProfileDir } = require('../browserProfiles');
 const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 const { launchPersistentSafe } = require('../profileLock');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 
 const DEFAULT_USER_DATA_DIR = path.join(__dirname, '..', 'data', 'browser-sessions', 'youtube');
 const YT_STUDIO_URL = 'https://studio.youtube.com';
@@ -977,6 +978,7 @@ async function uploadToYouTube(videoPath, metadata, credentials) {
     let verificationRequested = false;
     let lastStateKey = '';
     let repeatedStateCount = 0;
+    let phoneOptionPicked = false;
     let loggedIn = false;
     let loggedOutNotified = false;
     const recoveryPhone = String(credentials?.recoveryPhone || '598574742').replace(/\D/g, '');
@@ -1075,7 +1077,7 @@ async function uploadToYouTube(videoPath, metadata, credentials) {
         }
 
         // Picking from a list of phones ("ending in XX" options)
-        if (auth.phoneOptions && auth.phoneOptions.length > 0 && recoveryPhone) {
+        if (auth.phoneOptions && auth.phoneOptions.length > 0 && recoveryPhone && !phoneOptionPicked) {
           const tail2 = recoveryPhone.slice(-2);
           const picked = await page.evaluate((tail) => {
             const nodes = Array.from(document.querySelectorAll('[role="link"], [role="button"], li, div'));
@@ -1089,6 +1091,7 @@ async function uploadToYouTube(videoPath, metadata, credentials) {
             return false;
           }, tail2);
           if (picked) {
+            phoneOptionPicked = true;
             console.log(`[YouTube] Picked phone option ending in ${tail2}`);
             await page.waitForTimeout(2500);
             continue;
@@ -1318,7 +1321,17 @@ async function uploadToYouTube(videoPath, metadata, credentials) {
     }
 
     if (!fileInput) {
-      throw new Error('Could not open YouTube upload dialog. Try logging in manually first at https://studio.youtube.com');
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'YouTube video',
+        checkpoint: 'open upload dialog',
+        originalError: 'Could not open YouTube upload dialog.',
+        allowedClickTexts: ['create', 'upload videos', 'upload video'],
+        verify: async () => Boolean(await getYouTubeFileInput(page)),
+      });
+      if (arbiter.recovered) fileInput = await getYouTubeFileInput(page);
+      if (!fileInput) {
+        throw new Error(`Could not open YouTube upload dialog. AI arbiter could not safely clear the obstacle: ${arbiter.reason}. Try logging in manually first at https://studio.youtube.com`);
+      }
     }
 
     // ===== PHASE 3: UPLOAD VIDEO FILE =====
@@ -1708,17 +1721,28 @@ async function uploadToYouTube(videoPath, metadata, credentials) {
           console.log('[YouTube] Upload continuing — entering extended wait...');
           publishConfirmed = await waitForVideoUploadToComplete(page);
         } else {
-          await requestHumanObstacleHelp(
-            page,
-            credentials,
-            `Publish confirmation was not clearly detected. ${finalCheck.reason}\nIf YouTube still needs a final action, complete it and reply APPROVED.`
-          );
+          const arbiter = await attemptUploadArbiter(page, {
+            platform: 'YouTube video',
+            checkpoint: 'post-submit confirmation',
+            originalError: `Publish confirmation was not clearly detected. ${finalCheck.reason}`,
+            submissionAttempted: true,
+            verify: async () => (await assessYouTubePostPublishState(page)).successLike,
+          });
+          if (arbiter.recovered) {
+            publishConfirmed = true;
+          } else {
+            await requestHumanObstacleHelp(
+              page,
+              credentials,
+              `Publish confirmation was not clearly detected. ${finalCheck.reason}\nThe local AI arbiter found no safe automatic action. Complete any remaining YouTube step and reply APPROVED.`
+            );
+          }
           // After human APPROVED: upload may still be in progress — wait for it before declaring success
-          if (await isVideoUploadInProgress(page)) {
+          if (!publishConfirmed && await isVideoUploadInProgress(page)) {
             console.log('[YouTube] Upload still running after APPROVED — waiting for file transfer to complete...');
             await waitForVideoUploadToComplete(page);
           }
-          publishConfirmed = await waitForPublishConfirmation(page, 30000);
+          if (!publishConfirmed) publishConfirmed = await waitForPublishConfirmation(page, 30000);
           if (!publishConfirmed) {
             const secondCheck = await assessYouTubePostPublishState(page);
             publishConfirmed = secondCheck.successLike;

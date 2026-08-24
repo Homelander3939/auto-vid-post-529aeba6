@@ -18,17 +18,14 @@ const AGENTIC_PATTERNS = [
   /\bstep[\s-]*by[\s-]*step\b/i,
   /\bresearch\b[\s\S]{0,80}\b(build|create|generate|write|design|code)\b/i,
   /\b(build|create|generate|design|code|prototype|develop)\b[\s\S]{0,80}\b(app|website|landing page|portfolio|workflow|automation|agent|flow)\b/i,
-  /\b(open|use|run)\b[\s\S]{0,40}\bbrowser\b/i,
   /\bclaude code\b|\bcodex\b|\bopenclaw\b/i,
 ];
-const MIN_AGENTIC_PROMPT_LENGTH = 220;
 const MAX_ATTACHMENT_PREVIEW_LENGTH = 1_200;
 
 export function shouldLaunchAgentRun(text: string, files: AgentChatAttachment[] = []): boolean {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized && files.length === 0) return false;
   if (files.length > 0 && files.some((file) => !file.isImage && !!file.textContent)) return true;
-  if (normalized.length >= MIN_AGENTIC_PROMPT_LENGTH) return true;
   return AGENTIC_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 

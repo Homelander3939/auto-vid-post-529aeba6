@@ -8,6 +8,7 @@ const { getTikTokPageDescription, isTikTokPublishedUrl, isTikTokVideoUrl } = req
 const { getSharedBrowserProfileDir } = require('../browserProfiles');
 const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 const { launchPersistentSafe } = require('../profileLock');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 
 const DEFAULT_USER_DATA_DIR = path.join(__dirname, '..', 'data', 'browser-sessions', 'tiktok');
 
@@ -27,6 +28,11 @@ const MAX_FAILURE_MESSAGE_LENGTH = 500;
 const MAX_TELEGRAM_DIAGNOSTIC_CAPTION_LENGTH = 900;
 // How many 5-second polling intervals to wait for the Post button to become enabled (24 × 5s = 120s)
 const MAX_POST_BUTTON_WAIT_ATTEMPTS = 24;
+
+function isTikTokAuthUrl(candidate = '') {
+  const url = String(candidate || '').toLowerCase();
+  return url.includes('/login') || url.includes('passport.tiktok.com') || url.includes('redirect_url=');
+}
 
 function normalizeTikTokVideoUrl(candidate = '') {
   const raw = String(candidate || '').trim();
@@ -227,6 +233,10 @@ async function navigateToTikTokUpload(page) {
       // Wait progressively up to ~12s, polling for upload surface
       for (let i = 0; i < 6; i++) {
         await page.waitForTimeout(2000);
+        if (isTikTokAuthUrl(page.url())) {
+          console.log('[TikTok] Upload URL redirected to login; continuing with session recovery.');
+          return false;
+        }
         if (await hasUploadSurface()) {
           console.log('[TikTok] Upload surface detected.');
           return true;
@@ -609,12 +619,32 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
 
   try {
     // ===== PHASE 1: NAVIGATE TO UPLOAD PAGE =====
-    const navigated = await navigateToTikTokUpload(page);
-    if (!navigated) throw new Error('Could not navigate to TikTok upload page.');
+    let navigated = await navigateToTikTokUpload(page);
+    if (!navigated && !isTikTokAuthUrl(page.url())) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'TikTok video',
+        checkpoint: 'upload page ready',
+        originalError: 'Could not navigate to TikTok upload page.',
+        allowedClickTexts: ['upload video'],
+        verify: async () => {
+          if (await page.$('input[type="file"]').catch(() => null)) return true;
+          for (const frame of page.frames()) {
+            if (await frame.$('input[type="file"]').catch(() => null)) return true;
+          }
+          return false;
+        },
+      });
+      navigated = arbiter.recovered;
+      if (!navigated) {
+        throw new Error(`Could not navigate to TikTok upload page. AI arbiter could not safely clear the obstacle: ${arbiter.reason}`);
+      }
+    }
     await page.waitForTimeout(2000);
 
     // ===== PHASE 1b: LOGIN IF NEEDED =====
     let loginAttempts = 0;
+    let credentialsSubmitted = false;
+    let verificationRequested = false;
     while (loginAttempts++ < 15) {
       const url = page.url();
 
@@ -651,17 +681,11 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
       }
 
       // Check for login page
-      if (url.includes('login') || url.includes('passport')) {
-        const pageState = await page.evaluate(() => {
-          const hasEmail = !!document.querySelector('input[name="username"], input[type="email"], input[type="text"][placeholder*="email" i], input[type="text"][placeholder*="phone" i]');
-          const hasPassword = !!document.querySelector('input[type="password"]');
-          const hasCode = !!document.querySelector('input[type="tel"], input[name*="code" i]');
-          return { hasEmail, hasPassword, hasCode };
-        });
-
-        // Try to switch to email/password login
+      if (isTikTokAuthUrl(url)) {
+        // The first login screen commonly contains only login-method choices.
+        // Select email/password first, then inspect the newly rendered inputs.
         await page.evaluate(() => {
-          const links = document.querySelectorAll('a, div[role="link"], span, p');
+          const links = document.querySelectorAll('a, button, div[role="button"], div[role="link"], span, p');
           for (const link of links) {
             const text = link.textContent?.toLowerCase() || '';
             if (text.includes('email') || text.includes('password') || text.includes('log in with email')) {
@@ -671,24 +695,22 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         });
         await page.waitForTimeout(1500);
 
-        if (pageState.hasEmail || pageState.hasPassword) {
-          console.log('[TikTok] Filling login credentials...');
-          await smartFill(page, [
-            'input[name="username"]', 'input[type="email"]',
-            'input[type="text"][placeholder*="email" i]', 'input[type="text"]',
-          ], credentials.email);
-          await page.waitForTimeout(500);
+        const pageState = await page.evaluate(() => {
+          const hasEmail = !!document.querySelector('input[name="username"], input[type="email"], input[type="text"][placeholder*="email" i], input[type="text"][placeholder*="phone" i]');
+          const hasPassword = !!document.querySelector('input[type="password"]');
+          const hasCode = !!document.querySelector('input[type="tel"], input[name*="code" i]');
+          const text = (document.body?.innerText || '').toLowerCase();
+          const blockedReason =
+            text.includes('too many attempts') || text.includes('try again later') ? 'TikTok temporarily limited login attempts.' :
+            text.includes('incorrect password') || text.includes('invalid password') ? 'TikTok rejected the saved password.' :
+            text.includes('account doesn\'t exist') || text.includes('account not found') ? 'TikTok could not find the saved account.' : '';
+          return { hasEmail, hasPassword, hasCode, blockedReason };
+        });
 
-          if (pageState.hasPassword) {
-            await smartFill(page, ['input[type="password"]'], credentials.password);
-            await page.waitForTimeout(500);
-            await smartClick(page, ['button[type="submit"]', 'button[data-e2e="submit-button"]'], 'Log in');
-            await page.waitForTimeout(5000);
-          }
-          continue;
-        }
+        if (pageState.blockedReason) throw new Error(pageState.blockedReason);
 
-        if (pageState.hasCode) {
+        if (pageState.hasCode && !verificationRequested) {
+          verificationRequested = true;
           console.log('[TikTok] Verification code needed...');
           const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: true }).catch(() => null);
           const approval = await requestTelegramApproval({
@@ -704,9 +726,45 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
           }
           continue;
         }
+
+        if ((pageState.hasEmail || pageState.hasPassword) && !credentialsSubmitted) {
+          if (!credentials?.email || !credentials?.password) {
+            throw new Error('TikTok session expired and saved login credentials are incomplete. Open this account profile once and log in manually.');
+          }
+          credentialsSubmitted = true;
+          console.log('[TikTok] Filling login credentials...');
+          await smartFill(page, [
+            'input[name="username"]', 'input[type="email"]',
+            'input[type="text"][placeholder*="email" i]', 'input[type="text"]',
+          ], credentials.email);
+          await page.waitForTimeout(500);
+
+          if (pageState.hasPassword) {
+            await smartFill(page, ['input[type="password"]'], credentials.password);
+            await page.waitForTimeout(500);
+            await smartClick(page, ['button[type="submit"]', 'button[data-e2e="submit-button"]'], 'Log in');
+            await page.waitForTimeout(5000);
+          }
+          continue;
+        }
       }
 
       await page.waitForTimeout(3000);
+    }
+
+    // A successful login may land on the home page. Re-enter the upload page
+    // once, but only before any video file has been selected.
+    let readyFileInput = await page.$('input[type="file"]').catch(() => null);
+    if (!readyFileInput && !isTikTokAuthUrl(page.url())) {
+      console.log('[TikTok] Login completed away from uploader; reopening upload page.');
+      navigated = await navigateToTikTokUpload(page);
+      readyFileInput = await page.$('input[type="file"]').catch(() => null);
+    }
+    if (!readyFileInput && isTikTokAuthUrl(page.url())) {
+      throw new Error('TikTok session expired and login recovery did not complete. Check the saved account profile or approve TikTok verification.');
+    }
+    if (!readyFileInput && !navigated) {
+      throw new Error('TikTok login succeeded, but the upload page did not become ready. No video was selected; safe to retry.');
     }
 
     // ===== PHASE 1c: RECOVER FROM "Something went wrong / Retry" =====
@@ -1353,6 +1411,20 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
       throw new Error('TikTok publish appears complete, but no real TikTok video URL was found. Post link verification failed.');
     }
 
+    if (!completion.success) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'TikTok video',
+        checkpoint: 'post-submit confirmation',
+        originalError: completion.reason,
+        submissionAttempted: true,
+        verify: async () => (await assessTikTokCompletion(page)).success,
+      });
+      if (arbiter.recovered) {
+        completion = await assessTikTokCompletion(page);
+        videoUrl = videoUrl || await extractTikTokVideoUrl(page);
+      }
+    }
+
     if (!completion.success && completion.needsHuman) {
       const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: true }).catch(() => null);
       await requestTelegramApproval({
@@ -1406,4 +1478,4 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
   }
 }
 
-module.exports = { uploadToTikTok };
+module.exports = { uploadToTikTok, __test: { isTikTokAuthUrl } };

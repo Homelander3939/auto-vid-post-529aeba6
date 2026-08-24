@@ -4,6 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { execFile, exec, spawn } = require('child_process');
+const { DEFAULT_MODEL, ensureSingleLocalLLM } = require('./lm-studio-model-manager');
 
 const BASE_URL = (process.env.LM_STUDIO_URL || 'http://localhost:1234').replace(/\/+$/, '');
 const PORT = (() => {
@@ -151,35 +152,18 @@ async function firstAvailableModel(lmsPath) {
 
 async function ensureModelLoaded(lmsPath) {
   try {
-    const loaded = await getLoadedModels();
-    if (loaded.length > 0) {
-      console.log(`[LM Studio] Model already loaded: ${loaded[0].id || loaded[0].name || 'loaded model'}`);
-      return true;
-    }
-  } catch {}
-
-  const model = await firstAvailableModel(lmsPath);
-  const args = model ? ['load', model, '--gpu', 'max', '--yes'] : ['load', '--gpu', 'max', '--yes'];
-  console.log(model ? `[LM Studio] Loading first model in list: ${model}` : '[LM Studio] Loading default/recent model...');
-
-  try {
-    await execFileAsync(lmsPath, args, { timeout: 180_000 });
+    const preferredModel = String(process.env.LM_STUDIO_MODEL || DEFAULT_MODEL).trim();
+    const runtime = await ensureSingleLocalLLM({
+      preferredModel,
+      baseUrl: BASE_URL,
+      loadIfMissing: true,
+    });
+    console.log(`[LM Studio] The only active agent model is ${runtime.modelId} (${runtime.modelKey}).`);
+    return true;
   } catch (err) {
-    console.log(`[LM Studio] Model load command ended with: ${err.message}`);
+    console.log(`[LM Studio] Guarded model startup failed: ${err.message}`);
+    return false;
   }
-
-  for (let i = 0; i < 90; i += 1) {
-    try {
-      const loaded = await getLoadedModels();
-      if (loaded.length > 0) {
-        console.log(`[LM Studio] Model loaded: ${loaded[0].id || loaded[0].name || 'loaded model'}`);
-        return true;
-      }
-    } catch {}
-    await sleep(1_000);
-  }
-  console.log('[LM Studio] No model appeared loaded after waiting. Open LM Studio and load one manually.');
-  return false;
 }
 
 async function main() {

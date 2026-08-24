@@ -25,7 +25,13 @@ export interface SocialPostResult {
 }
 
 export interface PlatformVariant { description: string; hashtags: string[] }
-export interface SourceMeta { folder: string; files: string[] }
+export interface SourceMeta {
+  folder?: string;
+  files?: string[];
+  generator?: string;
+  quality?: Record<string, number | string | boolean | null>;
+  image?: { path?: string; sourceUrl?: string; credit?: string } | null;
+}
 
 export interface SocialPost {
   id: string;
@@ -147,10 +153,10 @@ export async function getAISettings(): Promise<AISettings> {
   const { data } = await supabase.from('app_settings').select('*').eq('id', 1).single();
   const row = (data || {}) as any;
   return {
-    provider: row.ai_provider || 'lovable',
+    provider: row.ai_provider || 'lmstudio',
     apiKey: row.ai_api_key || '',
-    model: row.ai_model || 'google/gemini-3-flash-preview',
-    baseUrl: row.ai_base_url || '',
+    model: row.ai_model || 'qwen3.8-27b-uncensored-aggressive',
+    baseUrl: row.ai_base_url || 'http://localhost:1234',
   };
 }
 
@@ -165,6 +171,13 @@ export async function saveAISettings(s: AISettings): Promise<void> {
     } as any)
     .eq('id', 1);
   if (error) throw new Error(error.message);
+  if (s.provider === 'lmstudio') {
+    await callLocalWorker('/api/ai/select-model', {
+      provider: s.provider,
+      model: s.model,
+      baseUrl: s.baseUrl || 'http://localhost:1234',
+    }, 180_000);
+  }
 }
 
 export async function getAgentSettings(): Promise<AgentSettings> {
@@ -346,11 +359,28 @@ export interface AIGenerateInput {
 export interface AISource { title: string; url: string; note?: string }
 
 export interface AIGenerateOutput {
-  description: string;
-  hashtags: string[];
+  description?: string;
+  hashtags?: string[];
   variants: Record<string, PlatformVariant>;
   imageUrl: string | null;
   imagePath: string | null;
+  imageCredit?: string;
+  imageSourceUrl?: string;
+  quality?: {
+    reachableSources: number;
+    independentDomains: number;
+    groundedFacts: number;
+    imageValidated: boolean | null;
+  };
+  delivery?: {
+    telegram?: {
+      configured: boolean;
+      photoSent: boolean;
+      photoMessageId: number | null;
+      textSent: boolean;
+      error: string | null;
+    };
+  };
   sources: AISource[];
   provider?: string;
   model?: string;
@@ -360,6 +390,8 @@ export interface AgentSource extends AISource {
   snippet?: string;
   favicon?: string;
   publishedAt?: string;
+  reachable?: boolean;
+  qualityScore?: number;
 }
 
 export interface AgentTool {
@@ -376,9 +408,9 @@ export type AIStreamEvent =
   | { type: 'tool'; kind: AgentTool['kind']; name: string; detail?: string }
   | { type: 'variant'; platform: string; description: string; hashtags: string[] }
   | { type: 'sources'; sources: AgentSource[] }
-  | { type: 'image'; imageUrl: string; imagePath: string; credit?: string }
+  | { type: 'image'; imageUrl: string; imagePath: string; credit?: string; sourceUrl?: string }
   | { type: 'saved'; id: string; status: string }
-  | { type: 'done'; variants: Record<string, PlatformVariant>; sources: AgentSource[]; imageUrl: string | null; imagePath: string | null; provider?: string; model?: string }
+  | { type: 'done'; variants: Record<string, PlatformVariant>; sources: AgentSource[]; imageUrl: string | null; imagePath: string | null; imageCredit?: string; imageSourceUrl?: string; quality?: AIGenerateOutput['quality']; provider?: string; model?: string }
   | { type: 'error'; error: string };
 
 // Persisted generation job — survives page navigation. The edge function mirrors every
@@ -541,7 +573,14 @@ export async function generatePostWithAI(input: AIGenerateInput): Promise<AIGene
   return data as AIGenerateOutput;
 }
 
-export interface AIModel { id: string; label?: string }
+export interface AIModel {
+  id: string;
+  label?: string;
+  type?: 'llm';
+  vision?: boolean;
+  toolUse?: boolean;
+  loaded?: boolean;
+}
 async function callLocalWorker<T>(path: string, body: unknown, timeoutMs = 15_000): Promise<T> {
   const response = await fetch(`${LOCAL_WORKER_URL}${path}`, {
     method: 'POST',
@@ -581,7 +620,7 @@ export async function listAIModels(provider: string, apiKey: string, baseUrl?: s
 
 export interface ConnectionTestResult { ok: boolean; error?: string; latency?: number; provider?: string; model?: string; sample?: string }
 export async function testAIConnection(provider: string, apiKey: string, model: string, baseUrl?: string): Promise<ConnectionTestResult> {
-  return callLocalWorker<ConnectionTestResult>('/api/ai/test', { provider, apiKey, model, baseUrl });
+  return callLocalWorker<ConnectionTestResult>('/api/ai/test', { provider, apiKey, model, baseUrl }, 300_000);
 }
 
 export async function testAgentConnection(

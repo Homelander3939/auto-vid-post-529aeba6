@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# Local configuration and persistent uploader state
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+server/data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

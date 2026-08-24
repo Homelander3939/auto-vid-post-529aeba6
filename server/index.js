@@ -20,20 +20,67 @@ if (require('fs').existsSync(dotenvPath)) {
 
 const express = require('express');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const {
+  DB_FILE,
+  STORAGE_DIR,
+  createLocalSupabaseClient,
+  listRows,
+  seedRecoveredAccounts,
+} = require('./localDatabase');
+const { startLocalBackupSchedule } = require('./localBackup');
 const { uploadToYouTube } = require('./uploaders/youtube');
 const { uploadToTikTok } = require('./uploaders/tiktok');
 const { uploadToInstagram } = require('./uploaders/instagram');
 const { checkPlatformStats, formatStatsForTelegram, runBrowserTask } = require('./uploaders/stats-scraper');
-const { sendTelegram } = require('./telegram');
+const { sendTelegram, sendTelegramPhoto } = require('./telegram');
+const { startLocalTelegramPoller } = require('./telegramPoller');
 const { scanFolder, scanAllFiles, getReadyPairs } = require('./folderWatcher');
 const { parseTextFile } = require('./textParser');
-const { processTelegramAIResponse, streamLMStudio, LM_STUDIO_URL, discoverLMStudioModels, refreshLMStudioConfigFromSettings, testLMStudioConnection } = require('./ai-handler');
+const {
+  processTelegramAIResponse,
+  streamLMStudio,
+  getAppContext,
+  executeAgentSkill,
+  explicitLocalBrowserSkillInput,
+  redactSensitiveText,
+  LM_STUDIO_URL,
+  discoverLMStudioModels,
+  refreshLMStudioConfigFromSettings,
+  testLMStudioConnection,
+} = require('./ai-handler');
+const {
+  installParsedAgentSkills,
+  normalizeAgentSkillRecord,
+  parseSkillFiles,
+  seedDefaultAgentMemories,
+  seedDefaultAgentSkills,
+} = require('./agentSkills');
+const { ensureSingleLocalLLM, getSingleLocalLLMStatus } = require('./lm-studio-model-manager');
 const { handleAgentCommand } = require('./agentWorkspace');
+const {
+  createLocalBrowserSession,
+  enqueueLocalBrowserSession,
+  getSessionScreenshotPath,
+  getSessionScreenshotHistoryPath,
+  resumeLocalBrowserSession,
+} = require('./localBrowserAgent');
 const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const {
+  baseHost: qualityBaseHost,
+  buildEvidencePacket,
+  extractPageMetadata,
+  fitVariantToLimit,
+  groundFactsToSources,
+  hostnameOf: qualityHostnameOf,
+  scoreImageCandidate,
+  selectDiverseSources,
+  sourceQualityGate,
+  validateImageBytes,
+  validateVariant,
+} = require('./researchQuality');
 const {
   closeBrowserProfileSession,
   copyScheduledSelectionsToJob,
@@ -52,10 +99,31 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '60mb' }));
 
-// --- Supabase client ---
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgcfeddzbgpcnzdgxzfp.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1nY2ZlZGR6YmdwY256ZGd4emZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwMDM3MDMsImV4cCI6MjA4OTU3OTcwM30.-EuZuspd55AdbVfpY5pFSw8Wuk_56iYbtOgCOMDOLhE';
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// --- Local metadata client ---
+// All schedules, jobs, posts, settings, and storage metadata stay on this PC.
+const supabase = createLocalSupabaseClient();
+
+try {
+  const browserStatePath = path.join(__dirname, 'data', 'browser-profiles.json');
+  const browserState = fs.existsSync(browserStatePath)
+    ? JSON.parse(fs.readFileSync(browserStatePath, 'utf8'))
+    : {};
+  seedRecoveredAccounts(browserState);
+} catch (error) {
+  console.warn('[LocalDB] Browser-account recovery seed skipped:', error.message);
+}
+
+seedDefaultAgentSkills(supabase)
+  .then((installed) => {
+    if (installed.length) console.log(`[AgentSkills] Installed ${installed.length} built-in local skills.`);
+  })
+  .catch((error) => console.warn('[AgentSkills] Built-in skill seed skipped:', error.message));
+
+seedDefaultAgentMemories(supabase)
+  .then((installed) => {
+    if (installed.length) console.log(`[AgentSkills] Installed ${installed.length} built-in local memories.`);
+  })
+  .catch((error) => console.warn('[AgentSkills] Built-in memory seed skipped:', error.message));
 
 // Track jobs currently being processed to prevent duplicates
 const processingJobs = new Set();
@@ -720,7 +788,90 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', async (req, res) => {
   const config = await refreshLMStudioConfigFromSettings(supabase).catch(() => ({ url: LM_STUDIO_URL, model: 'unknown' }));
-  res.json({ status: 'ok', mode: 'local', ai: { provider: 'lmstudio', url: config.url, model: config.model } });
+  const llmGuard = await getSingleLocalLLMStatus(config.url).catch((error) => ({ ok: false, loadedCount: -1, loaded: [], error: error.message }));
+  res.json({
+    status: 'ok',
+    mode: 'local',
+    runtime_contract_version: 5,
+    database: DB_FILE,
+    counts: Object.fromEntries([
+      'platform_accounts', 'social_post_accounts', 'schedule_config', 'social_post_schedules',
+      'scheduled_uploads', 'upload_jobs', 'social_posts',
+    ].map((table) => [table, listRows(table).length])),
+    ai: {
+      provider: 'lmstudio',
+      url: config.url,
+      model: config.model,
+      single_model_guard: {
+        ok: llmGuard.ok,
+        loaded_count: llmGuard.loadedCount,
+        loaded: (llmGuard.loaded || []).map((item) => ({ id: item.id, key: item.key })),
+        error: llmGuard.error || null,
+      },
+    },
+  });
+});
+
+app.get('/api/local-storage/:bucket/*', (req, res) => {
+  try {
+    const bucket = String(req.params.bucket || '').replace(/[^a-zA-Z0-9._-]/g, '-');
+    const segments = String(req.params[0] || '').split('/').filter(Boolean)
+      .map((part) => decodeURIComponent(part).replace(/[^a-zA-Z0-9._-]/g, '-'));
+    const root = path.resolve(STORAGE_DIR, bucket);
+    const target = path.resolve(root, ...segments);
+    if (!segments.length || (target !== root && !target.startsWith(`${root}${path.sep}`))) {
+      return res.status(400).json({ error: 'Invalid local storage path' });
+    }
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      return res.status(404).json({ error: 'Local file not found' });
+    }
+    return res.sendFile(target);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+function resolveLocalStorageTarget(bucketValue, objectValue) {
+  const bucket = String(bucketValue || '').replace(/[^a-zA-Z0-9._-]/g, '-');
+  const segments = String(objectValue || '').split('/').filter(Boolean)
+    .map((part) => decodeURIComponent(part).replace(/[^a-zA-Z0-9._-]/g, '-'));
+  const root = path.resolve(STORAGE_DIR, bucket);
+  const target = path.resolve(root, ...segments);
+  if (!bucket || !segments.length || (target !== root && !target.startsWith(`${root}${path.sep}`))) {
+    throw new Error('Invalid local storage path');
+  }
+  return { root, target, relative: segments.join('/') };
+}
+
+app.put('/api/local-storage/:bucket/*', express.raw({ type: '*/*', limit: '2gb' }), (req, res) => {
+  try {
+    const { target, relative } = resolveLocalStorageTarget(req.params.bucket, req.params[0]);
+    const upsert = String(req.get('X-Upsert') || '').toLowerCase() === 'true';
+    if (!upsert && fs.existsSync(target)) return res.status(409).json({ error: 'The resource already exists' });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temp, Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || ''));
+    fs.renameSync(temp, target);
+    return res.json({ data: { path: relative }, error: null });
+  } catch (error) {
+    return res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/local-storage/remove', (req, res) => {
+  try {
+    const removed = [];
+    for (const objectPath of Array.isArray(req.body?.paths) ? req.body.paths : []) {
+      const { target, relative } = resolveLocalStorageTarget(req.body?.bucket, objectPath);
+      if (fs.existsSync(target) && fs.statSync(target).isFile()) {
+        fs.unlinkSync(target);
+        removed.push(relative);
+      }
+    }
+    return res.json({ data: removed, error: null });
+  } catch (error) {
+    return res.status(500).json({ data: null, error: error.message });
+  }
 });
 
 app.post('/api/telegram/send', async (req, res) => {
@@ -750,6 +901,148 @@ app.post('/api/telegram/send', async (req, res) => {
   }
 });
 
+const LOCAL_SKILL_FILE_RE = /\.(json|md|txt|yaml|yml|toml|prompt|skill|agent|instructions)$/i;
+
+async function skillFilesFromZip(buffer, sourceName) {
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(buffer);
+  const entries = Object.values(zip.files)
+    .filter((entry) => !entry.dir && !entry.name.startsWith('__MACOSX/') && LOCAL_SKILL_FILE_RE.test(entry.name))
+    .slice(0, 40);
+  if (!entries.length) throw new Error('No importable local skill files were found in the ZIP.');
+  return Promise.all(entries.map(async (entry) => ({
+    path: entry.name,
+    content: await entry.async('string'),
+    sourceName,
+  })));
+}
+
+function normalizeManualSkillUrl(value) {
+  const url = new URL(String(value || '').trim());
+  if (url.protocol !== 'https:') throw new Error('Manual skill links must use HTTPS.');
+  if (url.hostname === 'github.com') {
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length === 2) return { kind: 'github-repository', owner: parts[0], repo: parts[1].replace(/\.git$/i, '') };
+    if (parts.length >= 5 && parts[2] === 'blob') {
+      return { url: `https://raw.githubusercontent.com/${parts[0]}/${parts[1]}/${parts[3]}/${parts.slice(4).join('/')}`, zip: false };
+    }
+  }
+  return { kind: 'file', url: url.toString(), zip: /\.zip(?:$|\?)/i.test(url.pathname) };
+}
+
+async function fetchGitHubRepositorySkillFiles(target, sourceName) {
+  const headers = {
+    'User-Agent': 'Auto-Vid-Post-Local-Skill-Installer/2.0',
+    Accept: 'application/vnd.github+json',
+  };
+  const repoResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}`, {
+    headers,
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!repoResponse.ok) throw new Error(`GitHub repository returned HTTP ${repoResponse.status}.`);
+  const repo = await repoResponse.json();
+  const branch = String(repo.default_branch || 'main');
+  const treeResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`, {
+    headers,
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!treeResponse.ok) throw new Error(`GitHub repository tree returned HTTP ${treeResponse.status}.`);
+  const tree = await treeResponse.json();
+  const repositorySlug = String(target.repo || '').replace(/\.git$/i, '').toLowerCase();
+  const allCandidates = (Array.isArray(tree.tree) ? tree.tree : [])
+    .filter((entry) => entry?.type === 'blob' && LOCAL_SKILL_FILE_RE.test(String(entry.path || '')))
+    .map((entry) => ({
+      ...entry,
+      priority: /(^|\/)(?:skill|skills|commands|agents|prompts)(\/|$)/i.test(entry.path) || /(^|\/)SKILL\.md$/i.test(entry.path) ? 0
+        : /(^|\/)(?:README|CLAUDE|AGENTS)\.md$/i.test(entry.path) ? 1 : 2,
+    }))
+    .sort((a, b) => a.priority - b.priority || String(a.path).localeCompare(String(b.path)));
+  const canonicalRepositorySkills = allCandidates.filter((entry) => {
+    const normalizedPath = String(entry.path || '').replace(/\\/g, '/').toLowerCase();
+    return normalizedPath === `skill/${repositorySlug}.md`
+      || normalizedPath === `skills/${repositorySlug}.md`
+      || normalizedPath === `skill/${repositorySlug}/skill.md`
+      || normalizedPath === `skills/${repositorySlug}/skill.md`;
+  });
+  const candidates = (canonicalRepositorySkills.length ? canonicalRepositorySkills : allCandidates)
+    .filter((entry, index, all) => entry.priority < 2 || !all.some((item) => item.priority < 2))
+    .slice(0, 120);
+  if (!candidates.length) throw new Error('No importable skill or instruction files were found in that GitHub repository.');
+  const files = [];
+  for (const entry of candidates) {
+    if (Number(entry.size || 0) > 8 * 1024 * 1024) continue;
+    const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/${encodeURIComponent(branch)}/${String(entry.path).split('/').map(encodeURIComponent).join('/')}`;
+    const response = await fetch(rawUrl, { headers, signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) continue;
+    const content = await response.text();
+    if (!content.trim()) continue;
+    files.push({ path: entry.path, content, sourceName });
+  }
+  if (!files.length) throw new Error('GitHub skill files were found, but none could be downloaded.');
+  return files;
+}
+
+async function fetchManualSkillFiles(value) {
+  const target = normalizeManualSkillUrl(value);
+  if (target.kind === 'github-repository') return fetchGitHubRepositorySkillFiles(target, value);
+  const response = await fetch(target.url, {
+    headers: { 'User-Agent': 'Auto-Vid-Post-Local-Skill-Installer/1.0', Accept: 'application/zip,text/plain,application/json' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Skill link returned HTTP ${response.status}.`);
+  const contentType = response.headers.get('content-type') || '';
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (target.zip || /zip|octet-stream/i.test(contentType)) return skillFilesFromZip(buffer, value);
+  if (buffer.length > 2 * 1024 * 1024) throw new Error('Skill file is larger than the 2 MB local safety limit.');
+  return [{ path: new URL(target.url).pathname.split('/').pop() || 'skill.md', content: buffer.toString('utf8') }];
+}
+
+app.post('/api/local-functions/agent-skills', async (req, res) => {
+  try {
+    const { action } = req.body || {};
+    if (action === 'install_bundle') {
+      const rows = parseSkillFiles(req.body?.files, req.body?.sourceName || 'local-files');
+      if (!rows.length) return res.status(400).json({ error: 'No importable skills were found in those files.' });
+      const installed = await installParsedAgentSkills(supabase, rows);
+      return res.json({ ok: true, count: installed.length, skills: installed, skill: installed[0] });
+    }
+    if (action === 'install_github') {
+      const files = await fetchManualSkillFiles(req.body?.url);
+      const rows = parseSkillFiles(files, req.body?.url || 'manual-link');
+      if (!rows.length) return res.status(400).json({ error: 'No importable skills were found at that link.' });
+      const installed = await installParsedAgentSkills(supabase, rows);
+      return res.json({ ok: true, count: installed.length, skills: installed, skill: installed[0] });
+    }
+    if (action === 'accept_pending') {
+      const { data: run, error } = await supabase.from('agent_runs').select('*').eq('id', req.body?.runId).single();
+      if (error || !run?.pending_skill) return res.status(404).json({ error: error?.message || 'Pending skill proposal not found.' });
+      const installed = await installParsedAgentSkills(supabase, [normalizeAgentSkillRecord({
+        ...run.pending_skill,
+        source: 'learned-local',
+        source_url: `agent-run:${run.id}`,
+        risk_level: 'guided',
+        execution: null,
+      })]);
+      await supabase.from('agent_runs').update({ pending_skill: null }).eq('id', run.id);
+      return res.json({ ok: true, count: installed.length, skills: installed, skill: installed[0] });
+    }
+    if (action === 'run_skill') {
+      const result = await executeAgentSkill(supabase, {
+        skillId: req.body?.skillId,
+        skillSlug: req.body?.skillSlug,
+        input: req.body?.input || {},
+        request: req.body?.request || '',
+        source: 'skills-page',
+      });
+      return res.status(result.ok === false && result.needs_input ? 422 : 200).json(result);
+    }
+    return res.status(400).json({ error: `Unsupported local agent-skills action: ${action || 'missing'}` });
+  } catch (error) {
+    console.error('[AgentSkills] Local function failed:', error.message);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.post('/api/agent-run', async (req, res) => {
   try {
     const { action, runId, prompt, source = 'local-web', telegram_chat_id = null, chat_settings = null, aiSettings = null } = req.body || {};
@@ -758,9 +1051,10 @@ app.post('/api/agent-run', async (req, res) => {
       return res.json({ ok: true });
     }
     if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+    const runtimePrompt = String(prompt);
     const selectedAI = await resolveSelectedAIConfig(chat_settings || aiSettings || null);
     const { data, error } = await supabase.from('agent_runs').insert({
-      prompt,
+      prompt: redactSensitiveText(runtimePrompt),
       source,
       telegram_chat_id,
       chat_settings: chat_settings || aiSettings || null,
@@ -771,7 +1065,7 @@ app.post('/api/agent-run', async (req, res) => {
       model: `${selectedAI.provider}:${selectedAI.model}`,
     }).select('id').single();
     if (error) throw error;
-    setImmediate(() => runLocalAgent(data.id).catch((err) => console.error('[LocalAgent] run failed:', err.message)));
+    setImmediate(() => runLocalAgent(data.id, runtimePrompt).catch((err) => console.error('[LocalAgent] run failed:', redactSensitiveText(err.message))));
     res.json({ runId: data.id, local: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -782,6 +1076,7 @@ const LOCAL_DB_TABLES = new Set([
   'app_settings', 'platform_accounts', 'upload_jobs', 'scheduled_uploads', 'schedule_config',
   'social_post_accounts', 'social_posts', 'social_post_schedules', 'generation_jobs',
   'pending_commands', 'agent_skills', 'agent_memories', 'agent_runs', 'telegram_messages',
+  'browser_sessions', 'telegram_bot_state',
 ]);
 
 function assertAllowedTable(table) {
@@ -924,6 +1219,9 @@ async function resolveSelectedAIConfig(override = null) {
     const model = String(override?.model || saved?.ai_model || savedLm?.model || process.env.LM_STUDIO_MODEL || '').trim();
     const apiKey = String(override?.apiKey || saved?.ai_api_key || savedLm?.apiKey || process.env.LM_STUDIO_API_KEY || 'lm-studio').trim();
     if (!model) throw new Error('No LM Studio model selected. Load a model in LM Studio or choose one in Settings.');
+    if (/(?:^|[-_/])(?:embed|embedding)(?:[-_/]|$)/i.test(model)) {
+      throw new Error('Embedding models cannot be used for AI Chat or browser-agent decisions. Select an LLM model.');
+    }
     return { provider, baseUrl, model, apiKey, label: `lmstudio · ${model}` };
   }
 
@@ -956,6 +1254,15 @@ async function appendGenerationEvent(jobId, event, data) {
 
 async function localChatCompletion(messages, { tools, tool_choice, max_tokens = 2048, temperature = 0.4, aiSettings = null } = {}) {
   const config = await resolveSelectedAIConfig(aiSettings);
+  let activeModel = config.model;
+  if (config.provider === 'lmstudio') {
+    const runtime = await ensureSingleLocalLLM({
+      preferredModel: config.model,
+      baseUrl: config.baseUrl,
+      loadIfMissing: true,
+    });
+    activeModel = runtime.modelId;
+  }
   const buildBody = (model) => ({
     model,
     messages,
@@ -963,6 +1270,7 @@ async function localChatCompletion(messages, { tools, tool_choice, max_tokens = 
     ...(tool_choice ? { tool_choice } : {}),
     temperature,
     max_tokens,
+    ...(config.provider === 'lmstudio' ? { reasoning_effort: 'none' } : {}),
   });
   const bases = config.provider === 'lmstudio'
     ? [...new Set([config.baseUrl, process.env.LM_STUDIO_URL, 'http://localhost:1234', 'http://127.0.0.1:1234'].filter(Boolean).map(normalizeLMStudioBaseUrl))]
@@ -976,25 +1284,16 @@ async function localChatCompletion(messages, { tools, tool_choice, max_tokens = 
       body: JSON.stringify(buildBody(model)),
     });
     let response;
-    try { response = await call(config.model); } catch (err) { lastError = `${config.provider} network error at ${base || endpoint}: ${err.message}`; continue; }
+    try { response = await call(activeModel); } catch (err) { lastError = `${config.provider} network error at ${base || endpoint}: ${err.message}`; continue; }
     let text = await response.text();
-    if (config.provider === 'lmstudio' && !response.ok && /model|not found|unloaded|cannot find/i.test(text)) {
-      const loaded = await discoverLMStudioModels(base, config.apiKey || 'lm-studio').catch(() => []);
-      const fallbackModel = loaded[0]?.id;
-      if (fallbackModel && fallbackModel !== config.model) {
-        console.warn(`[AI] Saved LM Studio model unavailable (${config.model}); retrying loaded model ${fallbackModel}`);
-        response = await call(fallbackModel);
-        text = await response.text();
-      }
-    }
     if (response.ok) return JSON.parse(text || '{}');
     lastError = `${config.provider} returned ${response.status}: ${text.slice(0, 300)}`;
   }
   throw new Error(lastError || `${config.provider} request failed`);
 }
 
-function slugifyAgentRun(s) {
-  return String(s || 'task').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'task';
+function directLocalBrowserInput(prompt) {
+  return explicitLocalBrowserSkillInput(prompt);
 }
 
 async function appendAgentEvent(runId, event) {
@@ -1028,23 +1327,46 @@ const LOCAL_AGENT_TOOLS = [
   { type: 'function', function: { name: 'finish', description: 'Finish the run with summary and artifacts.', parameters: { type: 'object', properties: { summary: { type: 'string' }, artifacts: { type: 'array', items: { type: 'object' } } }, required: ['summary'] } } },
 ];
 
-async function runLocalAgent(runId) {
+async function runLocalAgent(runId, runtimePrompt = null) {
   const { data: run } = await supabase.from('agent_runs').select('*').eq('id', runId).single();
   if (!run) return;
+  const effectivePrompt = String(runtimePrompt || run.prompt || '').trim();
   const settings = await getSettings().catch(() => null);
   const config = await resolveSelectedAIConfig(run.chat_settings || null);
-  const workspaceSlug = slugifyAgentRun(run.prompt);
   try {
     await appendAgentEvent(runId, { type: 'preflight_ok', component: 'local_worker', alive: true, message: `Local worker connected · ${config.label}` });
+
+    const browserInput = directLocalBrowserInput(effectivePrompt);
+    if (browserInput) {
+      await appendAgentEvent(runId, { type: 'tool_call', name: 'browser_task', label: 'Direct local Chromium task' });
+      const session = await createLocalBrowserSession(supabase, {
+        task: browserInput.task,
+        url: browserInput.url,
+        source: 'agent-run-direct-browser',
+      });
+      const completedSession = await enqueueLocalBrowserSession(supabase, session.id, {
+        notify: settings ? (message) => notifyTelegram(settings, message) : null,
+      });
+      const summary = completedSession.summary || 'Local Chromium task finished.';
+      await appendAgentEvent(runId, { type: 'tool_result', name: 'browser_task', ok: completedSession.status === 'completed', summary, data: { session_id: session.id } });
+      await appendAgentEvent(runId, { type: 'finish', summary });
+      await setAgentRunStatus(runId, {
+        status: completedSession.status === 'completed' ? 'completed' : 'failed',
+        completed_at: new Date().toISOString(),
+        result: { summary, browser_session_id: session.id },
+      });
+      return;
+    }
+
     await appendAgentEvent(runId, { type: 'tool_call', name: 'plan', label: `${config.provider} plan` });
     await appendAgentEvent(runId, { type: 'plan', steps: [`Use selected LLM provider: ${config.label}`, 'Use local browser/tools when needed', 'Return final result without Lovable AI credits'] });
     await appendAgentEvent(runId, { type: 'tool_result', name: 'plan', ok: true, summary: 'Local plan recorded.' });
 
     let researchContext = '';
-    if (/\b(research|latest|news|find out|crypto|web3|search|scrape|analy[sz]e)\b/i.test(run.prompt)) {
-      await appendAgentEvent(runId, { type: 'tool_call', name: 'research_deep', label: run.prompt.slice(0, 80) });
+    if (/\b(research|latest|news|find out|crypto|web3|search|scrape|analy[sz]e)\b/i.test(effectivePrompt)) {
+      await appendAgentEvent(runId, { type: 'tool_call', name: 'research_deep', label: redactSensitiveText(effectivePrompt).slice(0, 80) });
       const r = await fetch(`http://localhost:${PORT}/api/research/search`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: run.prompt, count: 6 }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: effectivePrompt, count: 6 }),
       });
       const data = await r.json().catch(() => ({}));
       const sources = Array.isArray(data.results) ? data.results.slice(0, 6) : [];
@@ -1054,23 +1376,44 @@ async function runLocalAgent(runId) {
 
     const reply = await localChatCompletion([
       { role: 'system', content: `You are a local-worker autonomous agent using the selected LLM provider (${config.label}). Do not mention cloud credits. Be concise and include useful sources when provided.` },
-      { role: 'user', content: `${run.prompt}${researchContext ? `\n\nLocal research sources:\n${researchContext}` : ''}` },
-    ], { max_tokens: 1800, temperature: 0.4, aiSettings: run.chat_settings || null });
+      { role: 'user', content: `${effectivePrompt}${researchContext ? `\n\nLocal research sources:\n${researchContext}` : ''}` },
+    ], { max_tokens: 700, temperature: 0.2, aiSettings: run.chat_settings || null });
     const summary = reply?.choices?.[0]?.message?.content || 'Done.';
-    await appendAgentEvent(runId, { type: 'finish', summary });
-    await setAgentRunStatus(runId, { status: 'completed', completed_at: new Date().toISOString(), result: { summary } });
+    const publicSummary = redactSensitiveText(summary);
+    await appendAgentEvent(runId, { type: 'finish', summary: publicSummary });
+    await setAgentRunStatus(runId, { status: 'completed', completed_at: new Date().toISOString(), result: { summary: publicSummary } });
     if (settings) {
       if (run.telegram_chat_id) settings.telegram.chatId = String(run.telegram_chat_id);
-      await notifyTelegram(settings, `✅ Local agent completed\n\n${summary}`);
+      await notifyTelegram(settings, `✅ Local agent completed\n\n${publicSummary}`);
     }
   } catch (err) {
-    await appendAgentEvent(runId, { type: 'error', message: err.message });
-    await setAgentRunStatus(runId, { status: 'failed', completed_at: new Date().toISOString(), error: err.message });
+    const publicError = redactSensitiveText(err.message || String(err));
+    await appendAgentEvent(runId, { type: 'error', message: publicError });
+    await setAgentRunStatus(runId, { status: 'failed', completed_at: new Date().toISOString(), error: publicError });
     if (settings) {
       if (run.telegram_chat_id) settings.telegram.chatId = String(run.telegram_chat_id);
-      await notifyTelegram(settings, `❌ Local agent failed: ${err.message}`);
+      await notifyTelegram(settings, `❌ Local agent failed: ${publicError}`);
     }
   }
+}
+
+async function recoverInterruptedAgentRuns() {
+  const { data: rows, error } = await supabase.from('agent_runs').select('*').eq('status', 'running');
+  if (error) throw new Error(error.message || String(error));
+  for (const row of rows || []) {
+    const events = [...(Array.isArray(row.events) ? row.events : []), {
+      type: 'error',
+      message: 'Interrupted by a local backend restart. Please rerun the task.',
+      ts: Date.now(),
+    }];
+    await supabase.from('agent_runs').update({
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error: 'Interrupted by a local backend restart. Please rerun the task.',
+      events,
+    }).eq('id', row.id);
+  }
+  if ((rows || []).length) console.log(`[LocalAgent] Recovered ${(rows || []).length} interrupted run(s).`);
 }
 
 function parseJsonFromText(text, fallback = {}) {
@@ -1095,18 +1438,69 @@ async function localJsonLLM(systemPrompt, userPrompt, fallback = {}, aiSettings 
   return parseJsonFromText(data?.choices?.[0]?.message?.content || '', fallback);
 }
 
-async function storeImageFromUrl(imageUrl) {
-  if (!imageUrl || String(imageUrl).startsWith('data:')) return { url: imageUrl || null, path: null };
-  const resp = await fetch(imageUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!resp.ok) return { url: imageUrl, path: null };
-  const contentType = resp.headers.get('content-type') || 'image/jpeg';
-  const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const storagePath = `local-${Date.now()}-${randomUUID()}.${ext}`;
-  const { error } = await supabase.storage.from('social-media').upload(storagePath, buffer, { contentType, upsert: true });
-  if (error) return { url: imageUrl, path: null };
+async function storeImageFromUrl(imageUrl, candidate = {}) {
+  if (!imageUrl) return { url: null, path: null, error: 'missing_image_url' };
+  let contentType = 'image/jpeg';
+  let buffer;
+
+  if (String(imageUrl).startsWith('data:')) {
+    const match = String(imageUrl).match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
+    if (!match) return { url: null, path: null, error: 'invalid_image_data_url' };
+    contentType = match[1].toLowerCase();
+    buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+  } else {
+    const resp = await fetch(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; LocalEditorialAgent/2.0)',
+        Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) return { url: null, path: null, error: `image_http_${resp.status}` };
+    contentType = String(resp.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    buffer = Buffer.from(await resp.arrayBuffer());
+  }
+
+  const validation = validateImageBytes(buffer, { contentType, candidate });
+  if (!validation.ok) return { url: null, path: null, error: validation.reason };
+  const ext = validation.format === 'png' ? 'png' : validation.format === 'webp' ? 'webp' : 'jpg';
+  const normalizedType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+  const storagePath = `manual-research/${Date.now()}-${randomUUID()}.${ext}`;
+  const { error } = await supabase.storage.from('social-media').upload(storagePath, buffer, { contentType: normalizedType, upsert: false });
+  if (error) return { url: null, path: null, error: `image_storage_${error.message}` };
   const { data } = supabase.storage.from('social-media').getPublicUrl(storagePath);
-  return { url: data?.publicUrl || imageUrl, path: storagePath };
+  const sourcePage = candidate.pageUrl || candidate.sourceUrl || '';
+  const sourceHost = qualityHostnameOf(sourcePage || imageUrl);
+  return {
+    url: data?.publicUrl || imageUrl,
+    path: storagePath,
+    buffer,
+    contentType: normalizedType,
+    width: validation.width,
+    height: validation.height,
+    sourceUrl: sourcePage || imageUrl,
+    credit: sourceHost ? `${sourceHost} · contextual source image` : 'Contextual source image',
+  };
+}
+
+async function storeBestImageCandidate(candidates, prompt) {
+  const seen = new Set();
+  const ranked = (Array.isArray(candidates) ? candidates : [])
+    .filter((candidate) => candidate?.url && !seen.has(candidate.url) && seen.add(candidate.url))
+    .sort((left, right) => scoreImageCandidate(right, prompt) - scoreImageCandidate(left, prompt));
+  const errors = [];
+  for (const candidate of ranked.slice(0, 12)) {
+    if (scoreImageCandidate(candidate, prompt) < 0) continue;
+    try {
+      const stored = await storeImageFromUrl(candidate.url, candidate);
+      if (stored.path) return { ...stored, candidate, errors };
+      errors.push(`${qualityHostnameOf(candidate.url) || 'image'}:${stored.error || 'rejected'}`);
+    } catch (error) {
+      errors.push(`${qualityHostnameOf(candidate.url) || 'image'}:${error.message || String(error)}`);
+    }
+  }
+  return { url: null, path: null, errors };
 }
 
 app.post('/api/ai/models', async (req, res) => {
@@ -1118,6 +1512,39 @@ app.post('/api/ai/models', async (req, res) => {
   } catch (err) {
     console.error('[AI] Model discovery failed:', err.message);
     res.status(502).json({ error: err.message || 'Could not load models' });
+  }
+});
+
+app.get('/api/ai/context', async (req, res) => {
+  try {
+    const context = await getAppContext(supabase);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), context });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Saving a model is an eject-only transition. The next AI request loads the
+// selected model after the guard confirms that no other agent LLM is loaded.
+app.post('/api/ai/select-model', async (req, res) => {
+  try {
+    const { provider = 'lmstudio', model, baseUrl } = req.body || {};
+    if (provider !== 'lmstudio') return res.json({ ok: true, provider, localModelChanged: false });
+    if (!String(model || '').trim()) return res.status(400).json({ ok: false, error: 'model is required' });
+    const runtime = await ensureSingleLocalLLM({
+      preferredModel: model,
+      baseUrl: baseUrl || LM_STUDIO_URL,
+      loadIfMissing: false,
+    });
+    res.json({
+      ok: true,
+      selectedModel: runtime.modelKey,
+      activeModel: runtime.ready ? runtime.modelId : null,
+      unloaded: runtime.unloaded,
+      nextRequestWillLoad: !runtime.ready,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -1264,17 +1691,29 @@ app.post('/api/generate-social-post', async (req, res) => {
 
     await emit('step', { id: 'plan', emoji: '🧠', label: 'Planning research strategy…', status: 'active' });
     const plan = await localJsonLLM(
-      'You plan a real-time social post research workflow.',
-      `Create JSON with keys: queries (array of 2-4 web search queries), imageQuery (string), imageStrategy (real_photo or none), angle (string), needsResearch (boolean). User request: ${prompt}. Platforms: ${platforms.join(', ')}.`,
+      'You are a quality-first editorial research planner. Plan primary-source verification, independent corroboration, and useful context before writing.',
+      `Today is ${new Date().toISOString().slice(0, 10)}. Create JSON with keys: queries (array of 3-4 precise web search queries), imageQuery (string), imageStrategy (real_photo or none), angle (string), needsResearch (boolean). The queries must include: (1) an official or primary source, (2) independent recent reporting, and (3) evidence, numbers, or informed context. When the request is recent/latest, never insert an older year. User request: ${prompt}. Platforms: ${platforms.join(', ')}.`,
       { queries: [prompt], imageQuery: prompt, imageStrategy: includeImage ? 'real_photo' : 'none', angle: prompt, needsResearch: true },
       aiSettings,
     );
-    const queries = (Array.isArray(plan.queries) && plan.queries.length ? plan.queries : [prompt]).slice(0, 4);
-    const imageStrategy = includeImage ? (plan.imageStrategy || 'real_photo') : 'none';
+    const currentYear = String(new Date().getFullYear());
+    const isRecentRequest = /\b(?:breaking|current|latest|newest|recent|today|this week|this month)\b/i.test(prompt);
+    const plannedQueries = Array.isArray(plan.queries) ? plan.queries
+      .map((query) => String(query || '').trim())
+      .map((query) => isRecentRequest ? query.replace(/\b20\d{2}\b/g, currentYear) : query)
+      .filter(Boolean) : [];
+    const queries = [...new Set([
+      ...plannedQueries,
+      `${prompt} official announcement primary source`,
+      `${prompt} independent reporting facts analysis`,
+    ])].slice(0, 4);
+    // "Include image" is a user decision. The LLM may choose the query and angle,
+    // but may not silently turn the requested image off.
+    const imageStrategy = includeImage ? 'real_photo' : 'none';
     await emit('step', { id: 'plan', emoji: '🧠', label: `Plan: ${plan.angle || prompt.slice(0, 80)}`, status: 'done' });
     await emit('plan', { queries, imageStrategy, angle: plan.angle || prompt });
 
-    const sources = [];
+    let sources = [];
     const seen = new Set();
     // Use saved research config (Brave first if provider+key set, then DDG, then local browser)
     const settingsRow = await supabase.from('app_settings').select('research_provider,research_api_key').eq('id', 1).single();
@@ -1307,47 +1746,144 @@ app.post('/api/generate-social-post', async (req, res) => {
         await emit('tool', { kind: 'research', name: data.provider || 'duckduckgo', detail: q });
         (data.results || []).filter((s) => s?.url && !seen.has(s.url)).slice(0, 5).forEach((s) => { seen.add(s.url); fresh.push(s); });
       }
-      fresh.forEach((s) => sources.push({ ...s, favicon: s.url ? `https://www.google.com/s2/favicons?sz=32&domain=${hostnameOf(s.url)}` : '' }));
+      fresh.forEach((s) => sources.push({
+        ...s,
+        query: q,
+        favicon: s.url ? `https://www.google.com/s2/favicons?sz=32&domain=${hostnameOf(s.url)}` : '',
+      }));
       await emit('step', { id: `search-${i}`, emoji: '🔎', label: `Found ${fresh.length} sources`, status: 'done' });
       for (const source of fresh) await emit('source', source);
     }
 
-    // Deep-dive: fetch top source pages and extract readable article text so the LLM has
-    // real content to summarise (not just headlines). Keeps it cheap by capping pages + chars.
-    await emit('step', { id: 'deepread', emoji: '📖', label: `Reading top ${Math.min(sources.length, 4)} sources for deeper context…`, status: 'active' });
-    const topSources = sources.slice(0, 4);
-    await Promise.all(topSources.map(async (s) => {
+    // Rank before reading so the context is spent on primary/credible and diverse domains,
+    // not whichever search result happened to arrive first.
+    const rankedSources = selectDiverseSources(sources, { query: prompt, max: 10, maxPerHost: 2 });
+    await emit('step', { id: 'deepread', emoji: '📖', label: `Verifying and reading ${Math.min(rankedSources.length, 6)} diverse sources…`, status: 'active' });
+    const hydrateSource = async (s) => {
       try {
-        const r = await fetch(s.url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LovableAgent/1.0)' }, signal: AbortSignal.timeout(8000) });
+        const r = await fetch(s.url, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LocalEditorialAgent/2.0)', Accept: 'text/html,application/xhtml+xml' },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(12_000),
+        });
+        s.httpStatus = r.status;
+        s.reachable = r.ok;
         if (!r.ok) return;
+        const contentType = String(r.headers.get('content-type') || '').toLowerCase();
+        if (contentType && !contentType.includes('html') && !contentType.includes('text')) {
+          s.reachable = false;
+          return;
+        }
         const html = await r.text();
-        // Strip scripts/styles, take text inside <article>/<main>/<p> if possible.
-        const cleaned = html
-          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-          .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
-        const articleMatch = cleaned.match(/<article[\s\S]*?<\/article>/i)?.[0]
-          || cleaned.match(/<main[\s\S]*?<\/main>/i)?.[0]
-          || cleaned;
-        const text = articleMatch
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 1800);
-        if (text.length > 200) s.content = text;
-      } catch (e) { /* skip page */ }
-    }));
-    const readCount = topSources.filter((s) => s.content).length;
-    await emit('step', { id: 'deepread', emoji: '📖', label: `Extracted full text from ${readCount} of ${topSources.length} pages`, status: 'done' });
+        const extracted = extractPageMetadata(html, r.url || s.url);
+        s.url = r.url || s.url;
+        s.title = extracted.title || s.title;
+        s.snippet = extracted.description || s.snippet;
+        s.publishedAt = extracted.publishedAt || s.publishedAt || null;
+        s.imageCandidates = extracted.images || [];
+        if (extracted.content.length >= 400) s.content = extracted.content;
+        else s.reachable = false;
+      } catch (e) {
+        s.reachable = false;
+        s.readError = e.message || String(e);
+      }
+      return s;
+    };
+    const topSources = rankedSources.slice(0, 6);
+    await Promise.all(topSources.map(hydrateSource));
+    sources = selectDiverseSources(topSources, { query: prompt, max: 8, maxPerHost: 2 });
+
+    // The broad discovery pass can find several valid but unrelated developments.
+    // Anchor the draft on its strongest primary/current source and run one exact
+    // independent-corroboration pass for that same story.
+    const anchorSource = sources.find((source) => source.reachable && source.content);
+    if (anchorSource) {
+      const anchorHost = qualityBaseHost(anchorSource.url);
+      const anchorTitle = String(anchorSource.title || '').replace(/\s+[|—-]\s+[^|—-]+$/, '').trim().slice(0, 180);
+      const corroborationQuery = `"${anchorTitle}" independent reporting analysis${anchorHost ? ` -site:${anchorHost}` : ''}`;
+      await emit('step', { id: 'corroborate', emoji: '🔬', label: 'Finding independent corroboration for the selected story…', status: 'active' });
+      try {
+        const response = await fetch(`http://localhost:${PORT}/api/research/search`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: corroborationQuery, count: 6 }),
+        });
+        const data = await response.json().catch(() => ({}));
+        const candidates = selectDiverseSources((data.results || [])
+          .filter((source) => source?.url && qualityBaseHost(source.url) !== anchorHost)
+          .map((source) => ({
+            ...source,
+            query: corroborationQuery,
+            corroborates: anchorSource.url,
+            favicon: `https://www.google.com/s2/favicons?sz=32&domain=${hostnameOf(source.url)}`,
+          })), { query: anchorTitle, max: 4, maxPerHost: 1 });
+        await Promise.all(candidates.slice(0, 4).map(hydrateSource));
+        sources = selectDiverseSources([...sources, ...candidates], { query: `${prompt} ${anchorTitle}`, max: 8, maxPerHost: 2 });
+        const verifiedCorroboration = sources.filter((source) => source.corroborates && source.reachable && source.content).length;
+        await emit('step', {
+          id: 'corroborate', emoji: verifiedCorroboration ? '✅' : '⚠️',
+          label: verifiedCorroboration ? `Verified ${verifiedCorroboration} independent corroborating source(s)` : 'No independent corroborating page was reachable',
+          status: verifiedCorroboration ? 'done' : 'error',
+        });
+      } catch (error) {
+        await emit('step', { id: 'corroborate', emoji: '⚠️', label: `Corroboration search failed: ${error.message}`, status: 'error' });
+      }
+    }
+    const sourceGate = sourceQualityGate(sources);
+    if (!sourceGate.ok) {
+      throw new Error(`Research quality gate failed: ${sourceGate.errors.join(', ')}. No weak draft was saved.`);
+    }
+    await emit('step', {
+      id: 'deepread', emoji: '✅',
+      label: `Verified ${sourceGate.readableCount} readable sources across ${sourceGate.independentDomains} independent domains`,
+      status: 'done',
+    });
+
+    await emit('step', { id: 'facts', emoji: '🧾', label: 'Building a source-linked fact ledger…', status: 'active' });
+    const researchEvidence = sources.map((source, index) => (
+      `[${index + 1}] ${source.title}\nPublished: ${source.publishedAt || 'not stated'}\n${source.content}\nURL: ${source.url}`
+    )).join('\n\n');
+    const factPackage = await localJsonLLM(
+      'You are a meticulous fact-checking editor. Extract only claims explicitly supported by the supplied sources. Never fill gaps from memory.',
+      `User goal: ${prompt}\n\nBuild JSON with: facts (array of 4-10 objects with claim, sourceIds as integer array, confidence high/medium), tensions (array), angle (string), uncertainty (string). Every fact must cite at least one valid source number. Prefer concrete names, dates, quantities, and direct consequences. Flag disagreement instead of resolving it by invention.\n\nSOURCES:\n${researchEvidence}`,
+      { facts: [], tensions: [], angle: plan.angle || prompt, uncertainty: '' },
+      aiSettings,
+    );
+    let facts = (Array.isArray(factPackage.facts) ? factPackage.facts : [])
+      .map((fact) => ({
+        claim: String(fact?.claim || '').trim(),
+        sourceIds: [...new Set((Array.isArray(fact?.sourceIds) ? fact.sourceIds : [])
+          .map(Number).filter((id) => Number.isInteger(id) && id >= 1 && id <= sources.length))],
+        confidence: fact?.confidence === 'medium' ? 'medium' : 'high',
+      }))
+      .filter((fact) => fact.claim.length >= 20 && fact.sourceIds.length > 0)
+      .slice(0, 10);
+    facts = groundFactsToSources(facts, sources);
+    if (facts.length < 3) {
+      throw new Error('Research quality gate failed: fewer than three claims matched exact supporting source spans. No weak draft was saved.');
+    }
+    const sourceUsage = new Map();
+    for (const fact of facts) {
+      for (const sourceId of fact.sourceIds) sourceUsage.set(sourceId, (sourceUsage.get(sourceId) || 0) + 1);
+    }
+    const supportingSources = sources
+      .map((source, index) => ({ ...source, factReferences: sourceUsage.get(index + 1) || 0 }))
+      .filter((source) => source.factReferences > 0 && source.reachable && source.content)
+      .sort((left, right) => right.factReferences - left.factReferences || (right.qualityScore || 0) - (left.qualityScore || 0));
+    const supportingGate = sourceQualityGate(supportingSources);
+    if (!supportingGate.ok) {
+      throw new Error(`Research quality gate failed: the fact ledger did not use two independent readable sources (${supportingGate.errors.join(', ')}). No weak draft was saved.`);
+    }
+    await emit('step', { id: 'facts', emoji: '✅', label: `Grounded ${facts.length} facts to exact source records`, status: 'done' });
 
     await emit('step', { id: 'write', emoji: '✍️', label: `Writing ${platforms.length} tailored narrative posts with local LLM…`, status: 'active' });
-    // Build a rich source block: include extracted page content when available, snippet otherwise.
+    // Build a rich source block and a compact fact ledger. The writer is allowed to
+    // transform this material, but not to add unsupported claims from model memory.
     const sourcesBlock = sources.slice(0, 8).map((s, i) => {
       const body = s.content || s.snippet || '';
       return `[${i + 1}] ${s.title}\n${body}\nURL: ${s.url}`;
     }).join('\n\n');
-    const platformLimits = { x: 280, twitter: 280, linkedin: 1200, facebook: 800, instagram: 1500, tiktok: 800 };
+    const factLedger = facts.map((fact, index) => `${index + 1}. [sources ${fact.sourceIds.join(', ')}] ${fact.claim}`).join('\n');
+    const platformLimits = { x: 278, twitter: 278, linkedin: 2200, facebook: 1800, instagram: 1800, tiktok: 1000 };
     const platformStyles = {
       x: 'Punchy, conversational, 1-3 short sentences. Strong hook in first 8 words. No bullet lists. No URLs.',
       twitter: 'Punchy, conversational, 1-3 short sentences. Strong hook in first 8 words. No bullet lists. No URLs.',
@@ -1358,80 +1894,191 @@ app.post('/api/generate-social-post', async (req, res) => {
     };
     const platformGuide = platforms.map((p) => {
       const k = p.toLowerCase();
-      return `- ${p} (max ~${platformLimits[k] || 800} chars): ${platformStyles[k] || 'Engaging, native to the platform.'}`;
+      return `- ${p} (hard maximum ${platformLimits[k] || 1800} characters INCLUDING rendered hashtags): ${platformStyles[k] || 'Engaging, native to the platform.'}`;
     }).join('\n');
     let variants = {};
-    // Try up to 2 attempts to coax valid JSON out of the local LLM
+    // Try twice for complete JSON. A malformed or ungrounded local-model response is
+    // never turned into the old generic/template draft.
     for (let attempt = 0; attempt < 2 && Object.keys(variants).length === 0; attempt += 1) {
       const write = await localJsonLLM(
-        'You are a senior social media writer. You DO NOT paste headlines or lists of links. You synthesise research into a real human-written story for each platform. Output ONLY a JSON object — no prose, no markdown fences. Hashtags are arrays of plain words WITHOUT the # symbol.',
-        `Write a unique, human-sounding social post for EACH platform below, based on the research.\n\nUser goal: ${prompt}\nAngle: ${plan.angle || prompt}\n\nRULES:\n- Write a real narrative — flowing sentences and short paragraphs.\n- DO NOT list headlines, bullets of source titles, or "•" lines.\n- DO NOT include raw URLs in the body.\n- Pull concrete facts, names, numbers from the research below; weave them naturally.\n- Match each platform's tone and length.\n- 4-8 relevant hashtags per platform (no # symbol).\n\nPlatforms:\n${platformGuide}\n\nResearch (use this to inform the story):\n${sourcesBlock || '(no sources — write from general knowledge of the topic)'}\n\nReturn EXACTLY this shape:\n{"variants":{${platforms.map((p) => `"${p}":{"description":"<full narrative post here>","hashtags":["tag1","tag2"]}`).join(',')}}}`,
+        'You are a senior evidence-led social editor. Synthesize; do not paste source headlines, produce a link list, or invent a missing detail. Output only JSON. Hashtags are arrays of plain words without #.',
+        `Write one distinct, human-sounding post for EVERY requested platform.\n\nUser goal: ${prompt}\nEditorial angle: ${factPackage.angle || plan.angle || prompt}\nKnown uncertainty: ${factPackage.uncertainty || 'None stated by the sources'}\n\nSOURCE-LINKED FACT LEDGER (authoritative):\n${factLedger}\n\nRULES:\n- Use only facts in the ledger. If a tension exists, state it carefully.\n- Lead with the most important verified development, then explain why it matters.\n- Prefer concrete names, dates, quantities, and consequences over hype.\n- Write flowing sentences and short paragraphs; never list source headlines.\n- No raw URLs, citations, placeholder text, or unsupported prediction in the post body.\n- Match each platform's native tone and stay below its hard maximum after hashtags.\n- Use 4-8 restrained relevant hashtags per platform (no # in the JSON values).\n\nPlatforms:\n${platformGuide}\n\nFULL VERIFIED SOURCE MATERIAL (for nuance only):\n${sourcesBlock}\n\nReturn EXACTLY this shape:\n{"variants":{${platforms.map((p) => `"${p}":{"description":"<complete narrative post>","hashtags":["tag1","tag2"]}`).join(',')}}}`,
         { variants: {} },
         aiSettings,
       );
       variants = write.variants || {};
     }
-    // Last-resort fallback: synthesise a narrative paragraph (NOT a bullet list) from research
-    if (Object.keys(variants).length === 0) {
-      const facts = sources.slice(0, 4)
-        .map((s) => (s.content || s.snippet || '').replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
-      const opener = `Here's what's happening with ${plan.angle || prompt}:`;
-      const body = facts.length
-        ? facts.map((f) => f.split(/(?<=[.!?])\s/).slice(0, 2).join(' ')).join(' ')
-        : `${prompt}. Latest reporting suggests this story is still developing — more soon.`;
-      const baseTags = (plan.angle || prompt).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3).slice(0, 5);
-      platforms.forEach((p) => {
-        const limit = platformLimits[p.toLowerCase()] || 800;
-        variants[p] = { description: `${opener}\n\n${body}`.slice(0, limit), hashtags: baseTags };
+
+    const alignVariants = (input) => Object.fromEntries(platforms.map((platform) => {
+      const exact = input?.[platform];
+      const insensitiveKey = Object.keys(input || {}).find((key) => key.toLowerCase() === platform.toLowerCase());
+      return [platform, exact || input?.[insensitiveKey] || {}];
+    }));
+    variants = Object.fromEntries(Object.entries(alignVariants(variants))
+      .map(([platform, variant]) => [platform, fitVariantToLimit(platform, variant)]));
+    let variantChecks = Object.fromEntries(platforms.map((platform) => [platform, validateVariant(platform, variants[platform])]));
+    let invalidPlatforms = platforms.filter((platform) => !variantChecks[platform].ok);
+    if (invalidPlatforms.length) {
+      await emit('step', { id: 'edit', emoji: '🧪', label: `Quality editor is repairing ${invalidPlatforms.join(', ')}…`, status: 'active' });
+      const repair = await localJsonLLM(
+        'You are the final editorial quality gate. Repair only the supplied posts. Preserve verified meaning; never add facts. Return JSON only.',
+        `Repair every platform variant so all errors are removed.\n\nErrors:\n${invalidPlatforms.map((platform) => `${platform}: ${variantChecks[platform].errors.join(', ')}`).join('\n')}\n\nHard limits and style:\n${platformGuide}\n\nVerified facts:\n${factLedger}\n\nCurrent variants:\n${JSON.stringify(variants)}\n\nReturn {"variants":{...}} with every requested platform. No URLs, lists of source titles, placeholders, or claims outside the fact ledger.`,
+        { variants },
+        aiSettings,
+      );
+      variants = Object.fromEntries(Object.entries(alignVariants(repair.variants || variants))
+        .map(([platform, variant]) => [platform, fitVariantToLimit(platform, variant)]));
+      variantChecks = Object.fromEntries(platforms.map((platform) => [platform, validateVariant(platform, variants[platform])]));
+      for (const platform of platforms) {
+        if (variantChecks[platform].errors.length && variantChecks[platform].errors.every((error) => error === 'too_long_with_hashtags')) {
+          variants[platform] = fitVariantToLimit(platform, variantChecks[platform].variant);
+        }
+      }
+      variantChecks = Object.fromEntries(platforms.map((platform) => [platform, validateVariant(platform, variants[platform])]));
+      invalidPlatforms = platforms.filter((platform) => !variantChecks[platform].ok);
+      await emit('step', {
+        id: 'edit', emoji: invalidPlatforms.length ? '⚠️' : '✅',
+        label: invalidPlatforms.length ? `Quality errors remain: ${invalidPlatforms.join(', ')}` : 'All platform variants passed editorial checks',
+        status: invalidPlatforms.length ? 'error' : 'done',
       });
-      await emit('step', { id: 'write-fallback', emoji: '🛟', label: 'LLM returned no JSON — synthesised narrative draft from extracted page text', status: 'done' });
     }
+    if (invalidPlatforms.length) {
+      const detail = invalidPlatforms.map((platform) => `${platform}:${variantChecks[platform].errors.join('+')}`).join(', ');
+      throw new Error(`Editorial quality gate failed (${detail}). No weak draft was saved.`);
+    }
+    variants = Object.fromEntries(platforms.map((platform) => [platform, variantChecks[platform].variant]));
     await emit('step', { id: 'write', emoji: '✨', label: `Wrote ${Object.keys(variants).length} platform variants`, status: 'done' });
     for (const platform of platforms) {
       const v = variants[platform];
       if (v) await emit('variant', { platform, description: v.description || '', hashtags: Array.isArray(v.hashtags) ? v.hashtags : [] });
     }
-    await emit('sources', { sources: sources.slice(0, 8) });
+    await emit('sources', { sources: supportingSources.slice(0, 8) });
 
     let imageUrl = null;
     let imagePath = null;
+    let imageCredit = '';
+    let imageSourceUrl = '';
+    let storedImage = null;
     if (includeImage && imageStrategy !== 'none') {
-      await emit('step', { id: 'image-local', emoji: '🌐', label: 'Finding image with local browser…', status: 'active' });
-      const imgResp = await fetch(`http://localhost:${PORT}/api/research/image-search`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: plan.imageQuery || prompt, urls: sources.slice(0, 3).map((s) => s.url), count: 4 }),
-      });
-      const imgData = await imgResp.json().catch(() => ({}));
-      const first = (imgData.images || [])[0];
-      const rawUrl = typeof first === 'string' ? first : first?.url;
-      if (rawUrl) {
-        const stored = await storeImageFromUrl(rawUrl);
-        imageUrl = stored.url; imagePath = stored.path;
-        await emit('tool', { kind: 'image', name: imgData.provider || 'local-browser', detail: plan.imageQuery || prompt });
-        await emit('step', { id: 'image-local', emoji: '🌐', label: `Image found via ${imgData.provider || 'local browser'}`, status: 'done' });
-        await emit('image', { imageUrl, imagePath, credit: imgData.provider || 'Local browser scrape' });
-      } else {
-        await emit('step', { id: 'image-local', emoji: '⚠️', label: 'No usable image found locally', status: 'error' });
+      const storyAnchor = supportingSources[0];
+      const imageQuery = `${storyAnchor?.title || factPackage.angle || prompt} ${factPackage.angle || ''} editorial news photo`.trim();
+      await emit('step', { id: 'image-local', emoji: '🖼️', label: 'Selecting and validating a contextual source image…', status: 'active' });
+      const sourceCandidates = supportingSources.slice(0, 4).flatMap((source) => (source.imageCandidates || []).map((candidate) => ({
+        ...candidate,
+        pageUrl: candidate.pageUrl || source.url,
+        title: candidate.title || source.title,
+      })));
+      storedImage = await storeBestImageCandidate(sourceCandidates, imageQuery);
+
+      let imageProvider = 'verified-source-page';
+      if (!storedImage?.path) {
+        const imgResp = await fetch(`http://localhost:${PORT}/api/research/image-search`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: imageQuery, urls: supportingSources.slice(0, 4).map((source) => source.url), count: 10 }),
+        });
+        const imgData = await imgResp.json().catch(() => ({}));
+        imageProvider = imgData.provider || 'local-browser';
+        const candidates = (imgData.images || []).map((candidate) => typeof candidate === 'string' ? { url: candidate, source: imageProvider } : candidate);
+        storedImage = await storeBestImageCandidate(candidates, imageQuery);
+        if (!storedImage?.path) {
+          const searchResponse = await fetch(`http://localhost:${PORT}/api/research/image-search`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: imageQuery, urls: [], count: 10 }),
+          });
+          const searchData = await searchResponse.json().catch(() => ({}));
+          imageProvider = searchData.provider || imageProvider;
+          const searchCandidates = (searchData.images || []).map((candidate) => typeof candidate === 'string' ? { url: candidate, source: imageProvider } : candidate);
+          storedImage = await storeBestImageCandidate(searchCandidates, imageQuery);
+        }
       }
+      if (!storedImage?.path) {
+        await emit('step', { id: 'image-local', emoji: '❌', label: 'No image passed size, dimensions, relevance, and file validation', status: 'error' });
+        throw new Error(`Image quality gate failed: ${storedImage?.errors?.slice(0, 4).join(', ') || 'no contextual candidate found'}. No text-only draft was saved.`);
+      }
+      imageUrl = storedImage.url;
+      imagePath = storedImage.path;
+      imageCredit = storedImage.credit || imageProvider;
+      imageSourceUrl = storedImage.sourceUrl || '';
+      await emit('tool', { kind: 'image', name: imageProvider, detail: imageQuery });
+      await emit('step', {
+        id: 'image-local', emoji: '✅',
+        label: `Saved validated ${storedImage.width || '?'}×${storedImage.height || '?'} image to local storage`,
+        status: 'done',
+      });
+      await emit('image', { imageUrl, imagePath, credit: imageCredit, sourceUrl: imageSourceUrl });
     }
+
+    const evidencePacket = buildEvidencePacket({
+      query: prompt,
+      sources,
+      facts,
+      images: storedImage?.path ? [{
+        url: imageUrl,
+        sourceUrl: imageSourceUrl,
+        contentType: storedImage.contentType,
+        width: storedImage.width,
+        height: storedImage.height,
+        byteLength: storedImage.buffer?.length || 0,
+        validated: true,
+      }] : [],
+      uncertainties: [factPackage.uncertainty, ...(Array.isArray(factPackage.tensions) ? factPackage.tensions : [])].filter(Boolean),
+      requireImage: includeImage,
+    });
+    if (!evidencePacket.quality.passed) {
+      throw new Error(`Evidence packet quality gate failed: ${evidencePacket.quality.errors.join(', ')}. No weak draft was saved.`);
+    }
+    await emit('evidence', { topicId: evidencePacket.topic_id, quality: evidencePacket.quality });
 
     let savedPostId = null;
     const primary = variants[platforms[0]] || Object.values(variants)[0];
     if (primary) {
       const { data: saved } = await supabase.from('social_posts').insert({
         description: primary.description || '', image_path: imagePath, hashtags: primary.hashtags || [], target_platforms: platforms,
-        account_selections: {}, scheduled_at: null, ai_prompt: prompt, ai_sources: sources.slice(0, 8), status: 'draft',
+        account_selections: {}, scheduled_at: null, ai_prompt: prompt, ai_sources: supportingSources.slice(0, 8), status: 'draft',
+        source_meta: {
+          generator: 'manual-quality-v2',
+          quality: {
+            reachableSources: supportingGate.readableCount,
+            independentDomains: supportingGate.independentDomains,
+            groundedFacts: facts.length,
+          },
+          image: imagePath ? { path: imagePath, sourceUrl: imageSourceUrl, credit: imageCredit } : null,
+          evidence_packet: evidencePacket,
+        },
         platform_results: platforms.map((name) => ({ name, status: 'pending' })), platform_variants: variants,
       }).select('id').single();
       savedPostId = saved?.id || null;
       if (savedPostId) await emit('saved', { id: savedPostId, status: 'draft' });
     }
 
-    const result = { variants, sources: sources.slice(0, 8), imageUrl, imagePath, provider: config.provider, model: config.model };
+    const result = {
+      variants,
+      sources: supportingSources.slice(0, 8),
+      imageUrl,
+      imagePath,
+      imageCredit,
+      imageSourceUrl,
+      evidencePacket,
+      quality: {
+        reachableSources: supportingGate.readableCount,
+        independentDomains: supportingGate.independentDomains,
+        groundedFacts: facts.length,
+        imageValidated: includeImage ? Boolean(imagePath) : null,
+      },
+      provider: config.provider,
+      model: config.model,
+    };
     await emit('step', { id: 'done', emoji: '🎉', label: 'All done — generated through local worker and saved as draft!', status: 'done' });
     await emit('done', result);
     await supabase.from('generation_jobs').update({ status: 'completed', result, saved_post_id: savedPostId, completed_at: new Date().toISOString() }).eq('id', jobId);
     const settings = await getSettings().catch(() => null);
+    const telegramDelivery = {
+      configured: Boolean(settings?.telegram?.enabled && settings?.telegram?.chatId),
+      photoSent: false,
+      photoMessageId: null,
+      textSent: false,
+      error: null,
+    };
     if (settings?.telegram?.enabled) {
       const originalChat = settings.telegram.chatId;
       if (telegram_chat_id) settings.telegram.chatId = String(telegram_chat_id);
@@ -1442,12 +2089,35 @@ app.post('/api/generate-social-post', async (req, res) => {
         const tags = Array.isArray(v.hashtags) && v.hashtags.length ? `\n#${v.hashtags.slice(0, 8).join(' #')}` : '';
         return `━━━ ${p.toUpperCase()} ━━━\n${v.description || ''}${tags}`;
       }).filter(Boolean).join('\n\n');
-      const sourceText = sources.length ? `\n\n📚 Sources:\n${sources.slice(0, 5).map((src, i) => `${i + 1}. ${src.title || src.url}\n${src.url || ''}`).join('\n')}` : '';
+      const sourceText = supportingSources.length ? `\n\n📚 Sources:\n${supportingSources.slice(0, 5).map((src, i) => `${i + 1}. ${src.title || src.url}\n${src.url || ''}`).join('\n')}` : '';
       const draftLink = savedPostId ? `\n\n🔗 Open draft: ${process.env.PUBLIC_APP_URL || 'http://localhost:8081'}/social?post=${savedPostId}` : '';
       const imgLine = imageUrl ? `\n\n🖼 Image: ${imageUrl}` : '';
-      await notifyTelegram(settings, `✅ AI post generated (${platforms.join(', ')})\n\n${variantBlocks}${imgLine}${sourceText}${draftLink}`);
+      if (storedImage?.buffer) {
+        try {
+          const primaryText = String(primary?.description || '').replace(/<[^>]+>/g, ' ').trim();
+          const photoResult = await sendTelegramPhoto(
+            settings.telegram.botToken,
+            settings.telegram.chatId,
+            storedImage.buffer,
+            `🖼 ${primaryText.slice(0, 850)}\n\nSource: ${imageCredit}`.slice(0, 1000),
+            settings.backend,
+            { mimeType: storedImage.contentType, fileName: path.basename(imagePath || 'editorial-image.jpg') },
+          );
+          telegramDelivery.photoSent = photoResult?.deliveryKind === 'photo' && photoResult?.photoSent === true;
+          telegramDelivery.photoMessageId = photoResult?.result?.message_id || null;
+          if (!telegramDelivery.photoSent) {
+            telegramDelivery.error = 'Telegram accepted the text fallback but did not accept the verified image.';
+          }
+        } catch (photoError) {
+          console.warn('[AI Post] Telegram image delivery failed:', photoError.message);
+          telegramDelivery.error = photoError.message || String(photoError);
+        }
+      }
+      telegramDelivery.textSent = await notifyTelegram(settings, `✅ AI post generated (${platforms.join(', ')})\n\n${variantBlocks}${imgLine}${sourceText}${draftLink}`);
       settings.telegram.chatId = originalChat;
     }
+    result.delivery = { telegram: telegramDelivery };
+    await supabase.from('generation_jobs').update({ result }).eq('id', jobId);
     if (stream) res.end(); else res.json(result);
   } catch (err) {
     console.error('[AI Post] Local generation failed:', err.message);
@@ -1560,7 +2230,7 @@ async function searchImagesFromSourcePages(urls = [], count = 3) {
           const isUsable = (value) => {
             const url = String(value || '').trim();
             if (!/^https?:/i.test(url)) return false;
-            if (/sprite|icon|logo|avatar|1x1|blank|emoji/i.test(url)) return false;
+            if (/sprite|icon|logo|avatar|1x1|blank|emoji|pixel|flag|social[-_ ]?media[-_ ]?card|open[-_ ]?graph[-_ ]?card/i.test(url)) return false;
             return true;
           };
 
@@ -1758,6 +2428,82 @@ app.get('/api/browser-research/screenshot/:file', (req, res) => {
     fs.createReadStream(full).pipe(res);
   } catch (e) {
     res.status(500).end(String(e.message || e));
+  }
+});
+
+// Local Chromium operator sessions. These are deliberately separate from
+// Browserbase/cloud sessions: every row represents a browser that ran on this
+// PC and exposes only a redacted action log plus a refreshed screenshot.
+app.get('/api/local-browser/sessions', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('browser_sessions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(30);
+    if (error) throw error;
+    res.json({ ok: true, sessions: data || [] });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+app.get('/api/local-browser/sessions/:id/screenshot', (req, res) => {
+  try {
+    const file = getSessionScreenshotPath(req.params.id);
+    if (!file) return res.status(404).end('Screenshot not available');
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    fs.createReadStream(file).pipe(res);
+  } catch (error) {
+    res.status(500).end(error.message || String(error));
+  }
+});
+
+app.get('/api/local-browser/sessions/:id/screenshots/:key', (req, res) => {
+  try {
+    const file = getSessionScreenshotHistoryPath(req.params.id, req.params.key);
+    if (!file) return res.status(404).end('Screenshot not available');
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    fs.createReadStream(file).pipe(res);
+  } catch (error) {
+    res.status(500).end(error.message || String(error));
+  }
+});
+
+app.post('/api/local-browser/run', async (req, res) => {
+  try {
+    const session = await createLocalBrowserSession(supabase, {
+      task: req.body?.task,
+      url: req.body?.url,
+      source: req.body?.source || 'local-app',
+    });
+    const settings = await getSettings().catch(() => null);
+    setImmediate(() => enqueueLocalBrowserSession(supabase, session.id, {
+      notify: settings ? (message) => notifyTelegram(settings, message) : null,
+    }).catch((error) => console.error(`[LocalBrowser] Session ${session.id} failed:`, error.message)));
+    res.json({
+      ok: true,
+      session,
+      session_id: session.id,
+      browser_url: `http://127.0.0.1:8081/browser?session=${encodeURIComponent(session.id)}`,
+      message: 'Local Chromium session queued. Open the Browser page to watch its screenshot and action log.',
+    });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+app.post('/api/local-browser/sessions/:id/resume', async (req, res) => {
+  try {
+    const settings = await getSettings().catch(() => null);
+    const session = await resumeLocalBrowserSession(supabase, req.params.id, {
+      notify: settings ? (message) => notifyTelegram(settings, message) : null,
+    });
+    res.json({ ok: true, session, session_id: session.id });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error.message || String(error) });
   }
 });
 
@@ -2158,6 +2904,12 @@ function scanLocalBundles(folderPath) {
   return bundles;
 }
 
+function filterBySourceFilename(items, sourceFilenameContains, getName) {
+  const needle = String(sourceFilenameContains || '').trim().toLowerCase();
+  if (!needle) return items;
+  return items.filter((item) => String(getName(item) || '').toLowerCase().includes(needle));
+}
+
 // --- Scan a local folder for TechPulse social-post bundles (browser-facing) ---
 app.post('/api/social-posts/scan-bundles', (req, res) => {
   try {
@@ -2266,6 +3018,62 @@ app.post('/api/check-all-stats', async (req, res) => {
   }
 });
 
+function createReasoningSafeSseFilter() {
+  const { Transform } = require('stream');
+  let buffered = '';
+  const sanitizeFrame = (frame) => {
+    if (!frame.trim()) return '';
+    const output = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) {
+        output.push(line);
+        continue;
+      }
+      const raw = line.slice(5).trim();
+      if (raw === '[DONE]') {
+        output.push('data: [DONE]');
+        continue;
+      }
+      try {
+        const payload = JSON.parse(raw);
+        for (const choice of Array.isArray(payload?.choices) ? payload.choices : []) {
+          if (choice?.delta) {
+            delete choice.delta.reasoning;
+            delete choice.delta.reasoning_content;
+          }
+          if (choice?.message) {
+            delete choice.message.reasoning;
+            delete choice.message.reasoning_content;
+          }
+        }
+        const meaningful = (payload?.choices || []).some((choice) =>
+          choice?.finish_reason || Object.keys(choice?.delta || choice?.message || {}).some((key) => key !== 'role'));
+        if (meaningful) output.push(`data: ${JSON.stringify(payload)}`);
+      } catch {
+        // Never proxy an unparsed provider frame that might contain hidden reasoning.
+      }
+    }
+    return output.join('\n');
+  };
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      buffered += chunk.toString('utf8');
+      const frames = buffered.split(/\r?\n\r?\n/);
+      buffered = frames.pop() || '';
+      for (const frame of frames) {
+        const safe = sanitizeFrame(frame);
+        if (safe) this.push(`${safe}\n\n`);
+      }
+      callback();
+    },
+    flush(callback) {
+      const safe = sanitizeFrame(buffered);
+      if (safe) this.push(`${safe}\n\n`);
+      callback();
+    },
+  });
+}
+
 // --- AI Chat endpoint (uses LM Studio locally instead of cloud AI) ---
 app.post('/api/ai-chat', async (req, res) => {
   try {
@@ -2362,7 +3170,7 @@ app.post('/api/ai-chat', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     if (streamResp.body && typeof streamResp.body.pipe === 'function') {
-      streamResp.body.pipe(res);
+      streamResp.body.pipe(createReasoningSafeSseFilter()).pipe(res);
     } else if (streamResp.body && typeof streamResp.body.getReader === 'function') {
       // Web ReadableStream (e.g. from our local SSE wrapper) — pump to the Node response.
       const reader = streamResp.body.getReader();
@@ -2618,26 +3426,34 @@ async function processRecurringSchedule(opts = {}) {
         // Prevent running multiple times in the same minute window — persisted in DB
         const nowMinuteStart = new Date(now);
         nowMinuteStart.setSeconds(0, 0);
-        if (!force && config.last_run_at) {
-          const lastRun = new Date(config.last_run_at);
-          // If last run was within the last 90 seconds, skip (already ran for this trigger)
-          if (nowMinuteStart.getTime() - lastRun.getTime() < 90_000) continue;
+        const lastAttemptAt = config.last_attempt_at || config.last_run_at;
+        if (!force && lastAttemptAt) {
+          const lastAttempt = new Date(lastAttemptAt);
+          // If the previous scan was within the last 90 seconds, skip this grace-window duplicate.
+          if (nowMinuteStart.getTime() - lastAttempt.getTime() < 90_000) continue;
         }
 
-        // Persist last_run_at + increment run_count immediately to prevent duplicate runs on restart
-        const newRunCount = (config.run_count || 0) + 1;
+        // Record an attempt separately. last_run_at means real matching work was found,
+        // so an empty early scan cannot suppress the post-generation catch-up handoff.
         await supabase.from('schedule_config').update({
-          last_run_at: now.toISOString(),
-          run_count: newRunCount,
+          last_attempt_at: now.toISOString(),
         }).eq('id', config.id);
 
-        console.log(`[Recurring] Schedule ${config.id} (${config.name}) matched at ${now.toISOString()}, run #${newRunCount}, scanning: ${folderPath}`);
+        console.log(`[Recurring] Schedule ${config.id} (${config.name}) matched at ${now.toISOString()}, scanning: ${folderPath}`);
 
         // Scan ALL files in folder, matched by name
         let allPairs = scanAllFiles(folderPath);
+        allPairs = filterBySourceFilename(
+          allPairs,
+          config.source_filename_contains,
+          (pair) => pair.videoFile,
+        );
         if (allPairs.length === 0) {
-          console.log(`[Recurring] No videos found in ${folderPath}`);
-          await notifyTelegram(settings, `⚠️ Schedule "${config.name}": no videos found in ${folderPath}`);
+          const filterNote = config.source_filename_contains
+            ? ` matching "${config.source_filename_contains}"`
+            : '';
+          console.log(`[Recurring] No videos found${filterNote} in ${folderPath}`);
+          await notifyTelegram(settings, `⚠️ Schedule "${config.name}": no videos found${filterNote} in ${folderPath}`);
           continue;
         }
 
@@ -2661,6 +3477,12 @@ async function processRecurringSchedule(opts = {}) {
           await notifyTelegram(settings, `⚠️ Schedule "${config.name}" skipped: no enabled platforms with credentials`);
           continue;
         }
+
+        const newRunCount = (config.run_count || 0) + 1;
+        await supabase.from('schedule_config').update({
+          last_run_at: now.toISOString(),
+          run_count: newRunCount,
+        }).eq('id', config.id);
 
         const intervalMinutes = config.upload_interval_minutes || 60;
         console.log(`[Recurring] Found ${allPairs.length} videos, uploading with ${intervalMinutes}min interval`);
@@ -2802,17 +3624,29 @@ async function processSocialFolderSchedules(opts = {}) {
             || (cHr.startsWith('*/') ? currentHour % parseInt(cHr.replace('*/', '')) === 0 : parseInt(cHr) === currentHour);
           const dowMatch = cDow === '*' || cDow.split(',').map(Number).includes(currentDow);
           if (!minMatch || !hrMatch || !dowMatch) { sSum.note = 'not-due'; continue; }
-          if (sched.last_run_at) {
-            const last = new Date(sched.last_run_at);
-            if (now.getTime() - last.getTime() < 90_000) { sSum.note = 'ran <90s ago'; continue; }
+          const lastAttemptAt = sched.last_attempt_at || sched.last_run_at;
+          if (lastAttemptAt) {
+            const lastAttempt = new Date(lastAttemptAt);
+            if (now.getTime() - lastAttempt.getTime() < 90_000) { sSum.note = 'scanned <90s ago'; continue; }
           }
         }
 
         const folderPath = String(sched.folder_path || '').trim();
         if (!folderPath) { sSum.note = 'no folder_path'; continue; }
 
+        await supabase.from('social_post_schedules').update({
+          last_attempt_at: now.toISOString(),
+        }).eq('id', sched.id);
+
         let bundles = [];
-        try { bundles = scanLocalBundles(folderPath); }
+        try {
+          bundles = scanLocalBundles(folderPath);
+          bundles = filterBySourceFilename(
+            bundles,
+            sched.source_filename_contains,
+            (bundle) => bundle.manifestName,
+          );
+        }
         catch (e) { sSum.note = `scan failed: ${e.message}`; summary.errors.push(`${sched.name}: ${e.message}`); continue; }
 
         sSum.scanned = bundles.length;
@@ -2830,13 +3664,9 @@ async function processSocialFolderSchedules(opts = {}) {
         });
         sSum.ready = ready.length;
         const perRun = Math.max(1, Number(sched.posts_per_run) || 1);
-        const pick = ready.slice(0, perRun);
-
-        // Stamp last_run_at + run_count immediately so a restart doesn't re-fire.
-        await supabase.from('social_post_schedules').update({
-          last_run_at: now.toISOString(),
-          run_count: (Number(sched.run_count) || 0) + 1,
-        }).eq('id', sched.id);
+        const pick = sched.prefer_latest === true
+          ? ready.slice(-perRun)
+          : ready.slice(0, perRun);
 
         if (pick.length === 0) {
           sSum.note = `nothing to queue (scanned=${bundles.length}, alreadyImported=${alreadyCount}, missingImages=${missingCount}). Tip: use Force re-run to ignore the imported list.`;
@@ -2867,6 +3697,13 @@ async function processSocialFolderSchedules(opts = {}) {
             continue;
           }
         }
+
+        // Only real, account-ready work counts as a run. Empty scans retain
+        // last_run_at so the factory handoff can catch up after generation.
+        await supabase.from('social_post_schedules').update({
+          last_run_at: now.toISOString(),
+          run_count: (Number(sched.run_count) || 0) + 1,
+        }).eq('id', sched.id);
 
         const newlyImported = [];
         for (const bundle of pick) {
@@ -2961,6 +3798,22 @@ async function fixStaleJobs() {
 // --- Pending commands (from Telegram bot via Supabase) ---
 const runningCommands = new Set();
 
+function redactSensitiveValue(value) {
+  if (Array.isArray(value)) return value.map(redactSensitiveValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSensitiveValue(item)]));
+  }
+  return typeof value === 'string' ? redactSensitiveText(value) : value;
+}
+
+async function redactCompletedTelegramInput(cmd) {
+  const updateId = Number(cmd?.args?.update_id);
+  if (!Number.isFinite(updateId)) return;
+  await supabase.from('telegram_messages').update({
+    text: redactSensitiveText(cmd.args?.user_text || ''),
+  }).eq('id', `telegram-in-${updateId}`);
+}
+
 async function processPendingCommands() {
   try {
     const { data: commands } = await supabase
@@ -3033,15 +3886,19 @@ async function processPendingCommands() {
               null,
             );
             await supabase.from('pending_commands').update({
-              status: 'completed', result: 'ai_reply_sent', completed_at: new Date().toISOString(),
+              status: 'completed',
+              result: 'ai_reply_sent',
+              args: redactSensitiveValue(cmd.args || {}),
+              completed_at: new Date().toISOString(),
             }).eq('id', cmd.id);
+            await redactCompletedTelegramInput(cmd);
           } else if (cmd.command === 'open_browser') {
             const task = cmd.args?.task || 'Open the browser and navigate to Google';
             const startUrl = cmd.args?.url || null;
             const silent = cmd.args?.silent === true;
             const settings = await getSettings();
 
-            console.log(`[Commands] open_browser: task="${task}"${startUrl ? `, url="${startUrl}"` : ''}`);
+            console.log(`[Commands] open_browser: running queued task${startUrl ? ' with a configured start URL' : ''}.`);
             const browserResult = await runBrowserTask(task, startUrl);
             const { summary } = browserResult;
             if (!silent) await notifyTelegram(settings, summary);
@@ -3157,17 +4014,18 @@ async function processPendingCommands() {
             }).eq('id', cmd.id);
           }
         } catch (err) {
-          console.error(`[Commands] Command ${cmd.id} failed:`, err.message);
+          const publicError = redactSensitiveText(err.message || String(err));
+          console.error(`[Commands] Command ${cmd.id} failed:`, publicError);
           const settingsForError = await getSettings().catch(() => null);
           if (settingsForError) {
             const isStats = cmd.command === 'check_stats';
             const errMsg = isStats
-              ? `❌ Stats check failed: ${err.message}\n\nThis usually means:\n1. The browser could not open (Playwright not installed?)\n2. The platform session needs login — upload a video first to save the session\n3. The platform website changed its layout\n\nTip: Make sure smart-launcher.bat is running and you have uploaded at least one video to the platform.`
-              : `❌ Browser task failed: ${err.message}\n\nTip: Make sure smart-launcher.bat is running and Playwright is installed (run install-browsers.bat).`;
+              ? `❌ Stats check failed: ${publicError}\n\nThis usually means:\n1. The browser could not open (Playwright not installed?)\n2. The platform session needs login — upload a video first to save the session\n3. The platform website changed its layout\n\nTip: Make sure smart-launcher.bat is running and you have uploaded at least one video to the platform.`
+              : `❌ Browser task failed: ${publicError}\n\nTip: Make sure smart-launcher.bat is running and Playwright is installed (run install-browsers.bat).`;
             await notifyTelegram(settingsForError, errMsg);
           }
           await supabase.from('pending_commands').update({
-            status: 'failed', result: err.message, completed_at: new Date().toISOString(),
+            status: 'failed', result: publicError, completed_at: new Date().toISOString(),
           }).eq('id', cmd.id).catch(() => {});
         } finally {
           runningCommands.delete(cmd.id);
@@ -3348,7 +4206,7 @@ function setupCron() {
       console.error('[Cron] Error:', e.message);
     }
   });
-  console.log('[Cron] Active: uploads every 5s, social posts every 10s, schedules every minute, commands every 15s');
+  console.log('[Cron] Active: uploads every 5s, social posts every 10s, schedules every minute, commands every 3s');
 }
 
 app.post('/api/refresh-cron', (req, res) => {
@@ -3420,8 +4278,11 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`\n🚀 Auto Vid Post — Local Server`);
   console.log(`   http://localhost:${PORT}`);
-  console.log(`   Connected to backend: ${SUPABASE_URL}`);
+  console.log(`   Local database: ${DB_FILE}`);
   console.log(`   AI: LM Studio at ${LM_STUDIO_URL}`);
   console.log(`   Mode: Local Playwright automation + Local AI\n`);
+  recoverInterruptedAgentRuns().catch((error) => console.warn('[LocalAgent] Startup recovery failed:', error.message));
+  startLocalBackupSchedule();
+  startLocalTelegramPoller({ supabase, getSettings });
   setupCron();
 });

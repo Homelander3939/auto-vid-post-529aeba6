@@ -3,6 +3,7 @@
 // Keeps existing external contract: module.exports = { uploadToFacebook }.
 
 const { launchPersistent, safeClose } = require('./social-post-base');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 
 function normalizeFacebookPermalink(raw) {
   if (!raw) return null;
@@ -178,37 +179,68 @@ async function clickFacebookModernComposerEntry(page) {
   return false;
 }
 
-async function findVisibleComposerTextbox(page) {
+function normalizeFacebookComposerText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+async function findVisibleComposerTextbox(page, expectedText = '') {
   const textboxes = page.locator(
     'div[role="dialog"] div[role="textbox"][contenteditable="true"], div[role="textbox"][contenteditable="true"]'
   );
 
   const count = await textboxes.count().catch(() => 0);
+  const expectedNeedle = normalizeFacebookComposerText(expectedText).slice(0, 70).toLowerCase();
+  let best = null;
 
-  for (let i = count - 1; i >= 0; i--) {
+  for (let i = 0; i < count; i++) {
     const tb = textboxes.nth(i);
+    if (!(await tb.isVisible().catch(() => false))) continue;
+    const info = await tb.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('data-placeholder') || ''}`.trim();
+      const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      return {
+        label,
+        text,
+        inDialog: Boolean(el.closest('[role="dialog"]')),
+        width: rect.width,
+        height: rect.height,
+      };
+    }).catch(() => null);
+    if (!info) continue;
+    if (/(comment|search|message|caption|alt text|describe photo)/i.test(info.label)) continue;
 
-    if (await tb.isVisible().catch(() => false)) {
-      return tb;
-    }
+    let score = info.inDialog ? 100 : 0;
+    if (/(what.*mind|write something|create post)/i.test(info.label)) score += 200;
+    if (expectedNeedle && info.text.toLowerCase().includes(expectedNeedle)) score += 500;
+    if (info.width >= 300) score += 40;
+    if (info.height >= 35) score += 20;
+    if (!best || score > best.score) best = { locator: tb, score };
   }
 
-  return null;
+  return best?.locator || null;
 }
 
-async function insertFacebookTextIntoActiveComposer(page, fullText, { required = true } = {}) {
-  if (!fullText) return true;
+async function insertFacebookTextIntoActiveComposer(page, fullText, { required = true, textbox = null } = {}) {
+  if (!fullText) return textbox || true;
 
-  const textbox = await findVisibleComposerTextbox(page);
+  let target = textbox;
+  if (!target || !(await target.isVisible().catch(() => false))) {
+    target = await findVisibleComposerTextbox(page, fullText);
+  }
 
-  if (!textbox) {
+  if (!target) {
     if (required) throw new Error('Facebook composer textbox is not visible.');
     return false;
   }
 
-  await textbox.scrollIntoViewIfNeeded().catch(() => {});
-  await textbox.click({ force: true }).catch(async () => {
-    await textbox.evaluate((node) => node.focus()).catch(() => {});
+  const expectedNeedle = normalizeFacebookComposerText(fullText).slice(0, 70).toLowerCase();
+  const current = normalizeFacebookComposerText(await target.innerText().catch(() => ''));
+  if (expectedNeedle && current.toLowerCase().includes(expectedNeedle)) return target;
+
+  await target.scrollIntoViewIfNeeded().catch(() => {});
+  await target.click({ force: true }).catch(async () => {
+    await target.evaluate((node) => node.focus()).catch(() => {});
   });
 
   await page.waitForTimeout(300);
@@ -221,7 +253,12 @@ async function insertFacebookTextIntoActiveComposer(page, fullText, { required =
   });
 
   await page.waitForTimeout(800);
-  return true;
+  const inserted = normalizeFacebookComposerText(await target.innerText().catch(() => ''));
+  if (!inserted || (expectedNeedle && !inserted.toLowerCase().includes(expectedNeedle))) {
+    if (required) throw new Error('Facebook composer did not retain the post text. Aborting to avoid a media-only post.');
+    return false;
+  }
+  return target;
 }
 
 async function clickVisibleDialogButton(page, names, timeout = 20000) {
@@ -298,6 +335,10 @@ async function attachImagesToFacebookComposer(page, imageFiles) {
   let attached = false;
 
   const inputCandidates = [
+    page.locator('div[role="dialog"] input[type="file"][multiple][accept*="image"]').last(),
+    page.locator('div[role="dialog"] input[type="file"][multiple]').last(),
+    page.locator('input[type="file"][multiple][accept*="image"]').last(),
+    page.locator('input[type="file"][multiple]').last(),
     page.locator('div[role="dialog"] input[type="file"][accept*="image"]').last(),
     page.locator('div[role="dialog"] input[type="file"]').last(),
     page.locator('input[type="file"][accept*="image"]').last(),
@@ -306,6 +347,8 @@ async function attachImagesToFacebookComposer(page, imageFiles) {
 
   for (const input of inputCandidates) {
     if (!(await input.count().catch(() => 0))) continue;
+    const acceptsMultiple = await input.getAttribute('multiple').then((value) => value !== null).catch(() => false);
+    if (imageFiles.length > 1 && !acceptsMultiple) continue;
 
     attached = await input
       .setInputFiles(imageFiles, { timeout: 10000 })
@@ -326,6 +369,9 @@ async function attachImagesToFacebookComposer(page, imageFiles) {
     const chooser = await chooserPromise;
 
     if (chooser) {
+      if (imageFiles.length > 1 && !chooser.isMultiple()) {
+        throw new Error('Facebook exposed only a single-file image picker for a multi-image post. Aborting instead of dropping images.');
+      }
       await chooser.setFiles(imageFiles);
       attached = true;
     }
@@ -1188,19 +1234,34 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
       const opened = await clickFacebookModernComposerEntry(page);
 
       if (!opened) {
-        throw new Error('Could not open the Facebook Create Post composer. Leaving source files for retry.');
+        const arbiter = await attemptUploadArbiter(page, {
+          platform: 'Facebook social post',
+          checkpoint: 'open composer',
+          originalError: 'Could not open the Facebook Create Post composer.',
+          allowedClickTexts: ["what's on your mind", 'create post', 'create'],
+          verify: () => facebookComposerOpen(page),
+        });
+        if (!arbiter.recovered) {
+          throw new Error(`Could not open the Facebook Create Post composer. AI arbiter could not safely clear the obstacle: ${arbiter.reason}. Leaving source files for retry.`);
+        }
       }
 
       await page.waitForTimeout(2000);
     }
 
-    await insertFacebookTextIntoActiveComposer(page, fullText, { required: true });
+    let composerTextbox = await insertFacebookTextIntoActiveComposer(page, fullText, { required: true });
 
     if (imageFiles.length) {
       await attachImagesToFacebookComposer(page, imageFiles);
     }
 
-    await insertFacebookTextIntoActiveComposer(page, fullText, { required: false });
+    // Media attachment can remount the dialog. Reuse the original textbox when
+    // possible, otherwise resolve the primary composer again. Do not clear text
+    // that is already correct, and refuse to publish if the body disappeared.
+    composerTextbox = await insertFacebookTextIntoActiveComposer(page, fullText, {
+      required: true,
+      textbox: composerTextbox,
+    });
 
     console.log('[Facebook] Clicking final Post button...');
     await clickFacebookVerifiedPostButton(page);
@@ -1212,10 +1273,22 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     await prepareFacebookViewport(page);
 
     console.log('[Facebook] Resolving posted Facebook link...');
-    const finalUrl = await resolveFacebookPostedUrl(page, targetUrl, fullText, opts);
+    let finalUrl = await resolveFacebookPostedUrl(page, targetUrl, fullText, opts);
 
     if (!finalUrl) {
-      throw new Error('Facebook post was submitted, but could not copy the link from the latest/matching post. Leaving source files for retry.');
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'Facebook social post',
+        checkpoint: 'post-submit link confirmation',
+        originalError: 'Facebook post was submitted, but its matching link was not found.',
+        submissionAttempted: true,
+        verify: async () => {
+          finalUrl = await resolveFacebookPostedUrl(page, targetUrl, fullText, opts);
+          return Boolean(finalUrl);
+        },
+      });
+      if (!arbiter.recovered || !finalUrl) {
+        throw new Error('Facebook post was submitted, but could not copy the link from the latest/matching post. The AI arbiter found no safe automatic recovery. Leaving source files for retry.');
+      }
     }
 
     console.log(`[Facebook] Successfully posted and copied link: ${finalUrl}`);
@@ -1225,4 +1298,11 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
   }
 }
 
-module.exports = { uploadToFacebook };
+module.exports = {
+  uploadToFacebook,
+  __test: {
+    findVisibleComposerTextbox,
+    insertFacebookTextIntoActiveComposer,
+    normalizeFacebookComposerText,
+  },
+};

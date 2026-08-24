@@ -7,6 +7,7 @@ const { smartClick, smartFill, analyzePage, waitForStateChange, runAgentTask } =
 const { getSharedBrowserProfileDir } = require('../browserProfiles');
 const { dismissOverlayBlockingFlow } = require('./overlay-dismiss');
 const { launchPersistentSafe } = require('../profileLock');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 
 /**
  * Pre-process video to 9:16 (1080x1920) with black padding using ffmpeg.
@@ -90,6 +91,42 @@ const INSTAGRAM_SHARE_PROCESSING_MAX_WAIT_MS = 180000;
 const INSTAGRAM_PROFILE_PUBLISH_WAIT_ATTEMPTS = 12;
 const INSTAGRAM_PROFILE_PUBLISH_WAIT_INTERVAL_MS = 3000;
 const INSTAGRAM_QUICK_PROFILE_LOAD_WAIT_MS = 1200;
+
+function classifyInstagramAuthSnapshot(snapshot = {}) {
+  const url = String(snapshot.url || '').toLowerCase();
+  const text = String(snapshot.text || '').toLowerCase();
+  const blockedReason =
+    text.includes('incorrect password') || text.includes('password was incorrect') ? 'Instagram rejected the saved password.' :
+    text.includes('try again later') || text.includes('wait a few minutes') ? 'Instagram temporarily limited login attempts.' :
+    text.includes('account has been disabled') || text.includes('account is disabled') ? 'Instagram reports that this account is disabled.' :
+    text.includes('couldn\'t log in') || text.includes('cannot log in') ? 'Instagram could not complete login with the saved session.' : '';
+  const needsVerification = Boolean(
+    snapshot.hasCode ||
+    url.includes('/challenge/') ||
+    url.includes('/checkpoint/') ||
+    text.includes('confirm it\'s you') ||
+    text.includes('confirm your identity') ||
+    text.includes('suspicious login attempt') ||
+    text.includes('security code')
+  );
+  return { blockedReason, needsVerification };
+}
+
+async function inspectInstagramAuthState(page) {
+  const snapshot = await page.evaluate(() => ({
+    url: window.location.href,
+    text: (document.body?.innerText || '').slice(0, 4000),
+    loggedIn: !!(document.querySelector('[aria-label="New post"]') ||
+      document.querySelector('svg[aria-label="New post"]') ||
+      document.querySelector('[aria-label="Home"]') ||
+      document.querySelector('a[href="/direct/inbox/"]') ||
+      document.querySelector('[aria-label="Search"]')),
+    hasUsername: !!document.querySelector('input[name="username"]'),
+    hasPassword: !!document.querySelector('input[name="password"]'),
+    hasCode: !!document.querySelector('input[name="verificationCode"], input[name="security_code"], input[autocomplete="one-time-code"]'),
+  })).catch(() => ({ url: page.url(), text: '', loggedIn: false, hasUsername: false, hasPassword: false, hasCode: false }));
+  return { ...snapshot, ...classifyInstagramAuthSnapshot(snapshot) };
+}
 
 function normalizeInstagramPostUrl(candidate = '') {
   const raw = String(candidate || '').trim();
@@ -1070,24 +1107,43 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
 
     let loginAttempts = 0;
     let loginPageNavigated = false;
+    let credentialsSubmitted = false;
+    let verificationRequested = false;
+    let stalledPageReloaded = false;
     while (loginAttempts++ < 15) {
-      const isLoggedIn = await page.evaluate(() => {
-        return !!(document.querySelector('[aria-label="New post"]') ||
-                  document.querySelector('svg[aria-label="New post"]') ||
-                  document.querySelector('[aria-label="Home"]') ||
-                  document.querySelector('a[href="/direct/inbox/"]') ||
-                  document.querySelector('[aria-label="Search"]'));
-      });
-      if (isLoggedIn) { console.log('[Instagram] Logged in'); break; }
+      const pageState = await inspectInstagramAuthState(page);
+      if (pageState.loggedIn) { console.log('[Instagram] Logged in'); break; }
+      if (pageState.blockedReason) throw new Error(pageState.blockedReason);
 
-      // Detect login form by DOM presence (URL may be "/" with the login modal)
-      const pageState = await page.evaluate(() => ({
-        hasUsername: !!document.querySelector('input[name="username"]'),
-        hasPassword: !!document.querySelector('input[name="password"]'),
-        hasCode: !!document.querySelector('input[name="verificationCode"], input[name="security_code"]'),
-      }));
+      if (pageState.needsVerification && !verificationRequested) {
+        verificationRequested = true;
+        console.log('[Instagram] Account verification needed...');
+        const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: true }).catch(() => null);
+        const approval = await requestTelegramApproval({
+          telegram: credentials.telegram,
+          platform: 'Instagram',
+          backend: credentials.backend,
+          screenshotBuffer,
+          customMessage: '🔐 <b>Instagram verification needed</b>\nReply with APPROVED after device confirmation or CODE 123456 if a code is required.',
+        });
+        if (approval?.code) {
+          await tryFillVerificationCode(page, approval.code);
+        }
+        await page.waitForTimeout(5000);
+        continue;
+      }
+      if (pageState.needsVerification) {
+        // Do not navigate away from a challenge after the single approval
+        // request. Give Instagram time to apply the device confirmation.
+        await page.waitForTimeout(3000);
+        continue;
+      }
 
-      if (pageState.hasUsername && pageState.hasPassword) {
+      if (pageState.hasUsername && pageState.hasPassword && !credentialsSubmitted) {
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error('Instagram session expired and saved login credentials are incomplete. Open this account profile once and log in manually.');
+        }
+        credentialsSubmitted = true;
         console.log('[Instagram] Filling login...');
         await smartFill(page, ['input[name="username"]'], credentials.email);
         await page.waitForTimeout(300);
@@ -1114,23 +1170,6 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
         continue;
       }
 
-      if (pageState.hasCode) {
-        console.log('[Instagram] Verification code needed...');
-        const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: true }).catch(() => null);
-        const approval = await requestTelegramApproval({
-          telegram: credentials.telegram,
-          platform: 'Instagram',
-          backend: credentials.backend,
-          screenshotBuffer,
-          customMessage: '🔐 <b>Instagram verification needed</b>\nReply with APPROVED after device confirmation or CODE 123456 if a code is required.',
-        });
-        if (approval?.code) {
-          await tryFillVerificationCode(page, approval.code);
-          await page.waitForTimeout(5000);
-        }
-        continue;
-      }
-
       // Neither logged-in markers nor a login form — explicitly navigate to login page once
       if (!loginPageNavigated) {
         loginPageNavigated = true;
@@ -1140,16 +1179,27 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
         continue;
       }
 
+      // Recover one stale/partially-rendered login page. This happens after a
+      // long-idle persistent profile, and is safe because no media is selected.
+      if (!stalledPageReloaded && loginAttempts >= 4) {
+        stalledPageReloaded = true;
+        console.log('[Instagram] Login page stalled — reloading once before failing.');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+        continue;
+      }
+
       await page.waitForTimeout(3000);
     }
 
-    const loggedIn = await page.evaluate(() => {
-      return !!(document.querySelector('[aria-label="New post"]') ||
-                document.querySelector('svg[aria-label="New post"]') ||
-                document.querySelector('[aria-label="Home"]') ||
-                document.querySelector('[aria-label="Search"]'));
-    });
-    if (!loggedIn) throw new Error('Instagram login failed. Try logging in manually first.');
+    const finalAuthState = await inspectInstagramAuthState(page);
+    if (!finalAuthState.loggedIn) {
+      if (finalAuthState.blockedReason) throw new Error(finalAuthState.blockedReason);
+      if (finalAuthState.needsVerification) {
+        throw new Error('Instagram verification is still pending. Complete the Telegram/device approval, then retry.');
+      }
+      throw new Error('Instagram session expired and bounded login recovery did not complete. Open this saved account profile once and log in manually.');
+    }
 
     // Capture baseline latest post URL before starting a new upload to prevent false-success
     // links (old posts from profile grid).
@@ -1226,7 +1276,21 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
     }
     
     if (!newPostClicked) {
-      throw new Error('Instagram: Could not find Create/New post button. Make sure you are logged in.');
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'Instagram video',
+        checkpoint: 'open create flow',
+        originalError: 'Could not find Create/New post button.',
+        allowedClickTexts: ['create', 'new post'],
+        verify: () => page.evaluate(() => {
+          const text = (document.body?.innerText || '').toLowerCase();
+          return Boolean(document.querySelector('input[type="file"], [role="dialog"], [role="menu"]')) ||
+            (text.includes('post') && text.includes('reel') && text.includes('story'));
+        }).catch(() => false),
+      });
+      newPostClicked = arbiter.recovered;
+      if (!newPostClicked) {
+        throw new Error(`Instagram: Could not find Create/New post button. AI arbiter could not safely clear the obstacle: ${arbiter.reason}. Make sure you are logged in.`);
+      }
     }
 
     await page.waitForTimeout(3000);
@@ -1364,7 +1428,25 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
     }
     
     if (!fileUploaded) {
-      throw new Error(`Instagram upload dialog not found after opening create flow (url: ${page.url()}). Try creating a post manually first to verify your session.`);
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'Instagram video',
+        checkpoint: 'upload input available',
+        originalError: `Upload dialog not found after opening create flow at ${page.url()}.`,
+        // The arbiter may clear Retry/cookie/promotional blockers, but it may
+        // not press the file-picker itself. Existing code owns file selection.
+        allowedClickTexts: [],
+        verify: async () => Boolean(await page.$('input[type="file"]').catch(() => null)),
+      });
+      if (arbiter.recovered) {
+        fileInput = await page.$('input[type="file"]').catch(() => null);
+        if (fileInput) {
+          await fileInput.setInputFiles(actualVideoPath);
+          fileUploaded = true;
+        }
+      }
+      if (!fileUploaded) {
+        throw new Error(`Instagram upload dialog not found after opening create flow (url: ${page.url()}). AI arbiter could not safely clear the obstacle: ${arbiter.reason}. Try creating a post manually first to verify your session.`);
+      }
     }
 
     console.log('[Instagram] Video file set, waiting for video to load in dialog...');
@@ -2444,6 +2526,20 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
       }
     }
 
+    if (!completion.success) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'Instagram video',
+        checkpoint: 'post-submit confirmation',
+        originalError: completion.reason,
+        submissionAttempted: true,
+        verify: async () => (await assessInstagramCompletion(page)).success,
+      });
+      if (arbiter.recovered) {
+        completion = await assessInstagramCompletion(page);
+        postUrl = postUrl || await extractInstagramPostUrl(page);
+      }
+    }
+
     if (!completion.success && completion.needsHuman) {
       const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: true }).catch(() => null);
       await requestTelegramApproval({
@@ -2527,4 +2623,4 @@ async function uploadToInstagram(videoPath, metadata, credentials) {
   }
 }
 
-module.exports = { uploadToInstagram };
+module.exports = { uploadToInstagram, __test: { classifyInstagramAuthSnapshot } };

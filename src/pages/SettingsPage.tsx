@@ -514,7 +514,11 @@ export default function SettingsPage() {
       const models = await listAIModels(provider, apiKey, baseUrl);
       setAiModels(models);
       if (provider === 'lmstudio' && models.length > 0) {
-        setAiSettings((s) => models.some((m) => m.id === s.model) ? s : { ...s, model: models[0].id });
+        setAiSettings((s) => {
+          if (models.some((m) => m.id === s.model)) return s;
+          const preferred = models.find((m) => m.id === 'qwen3.8-27b-uncensored-aggressive') || models[0];
+          return { ...s, model: preferred.id };
+        });
       }
     } catch (e: any) {
       setModelsError(e.message || 'Failed to load models');
@@ -812,7 +816,9 @@ export default function SettingsPage() {
                   <SelectTrigger><SelectValue placeholder="Select a model" /></SelectTrigger>
                   <SelectContent className="max-h-72">
                     {aiModels.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>{m.label || m.id}</SelectItem>
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.label || m.id}{m.vision ? ' · vision' : ''}{m.toolUse ? ' · tools' : ''}{m.loaded ? ' · loaded' : ''}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -820,12 +826,17 @@ export default function SettingsPage() {
                 <Input
                   value={aiSettings.model}
                   onChange={(e) => setAiSettings((s) => ({ ...s, model: e.target.value }))}
-                  placeholder={aiSettings.provider === 'lovable' ? 'google/gemini-3-flash-preview' : aiSettings.provider === 'lmstudio' ? 'e.g. google/gemma-3-27b' : 'Enter API key to load models'}
+                  placeholder={aiSettings.provider === 'lovable' ? 'google/gemini-3-flash-preview' : aiSettings.provider === 'lmstudio' ? 'e.g. qwen3.8-27b-uncensored-aggressive' : 'Enter API key to load models'}
                   disabled={loadingModels}
                 />
               )}
               {modelsError && (
                 <p className="text-[11px] text-destructive">{modelsError}</p>
+              )}
+              {aiSettings.provider === 'lmstudio' && !modelsError && (
+                <p className="text-[11px] text-muted-foreground">
+                  Agent-compatible LLMs are shown here. Embedding models remain available to search/memory tools but cannot produce chat or browser decisions.
+                </p>
               )}
             </div>
           </div>

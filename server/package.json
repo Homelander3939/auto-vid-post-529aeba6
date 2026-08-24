@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "install-browsers": "npx playwright install chromium"
+    "install-browsers": "npx playwright install chromium",
+    "benchmark:agent": "node benchmarks/local-agent-benchmark.js",
+    "benchmark:agent:live": "node benchmarks/local-agent-benchmark.js --live"
   },
   "dependencies": {
     "@browserbasehq/stagehand": "^2.0.0",

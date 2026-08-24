@@ -3,6 +3,7 @@
 // (linkedin.com/company/<id>/admin/page-posts/published/) where the composer
 // auto-opens and we must NOT wait for a "Start a post" button.
 const { launchPersistent, safeClose } = require('./social-post-base');
+const { attemptUploadArbiter } = require('./upload-arbiter');
 
 const LI_FEED_URL = 'https://www.linkedin.com/feed/';
 
@@ -18,9 +19,39 @@ async function getComposerText(page) {
   return await page.locator('div[role="dialog"] div[contenteditable="true"]').first().innerText().catch(() => '');
 }
 
+async function clickLinkedInStartPostCandidate(page) {
+  const candidates = page.getByText('Start a post', { exact: true });
+  const count = await candidates.count().catch(() => 0);
+
+  for (let i = 0; i < count; i++) {
+    const label = candidates.nth(i);
+    if (!(await label.isVisible().catch(() => false))) continue;
+
+    const clicked = await label.evaluate((node) => {
+      const target = node.closest('button, a, [role="button"], [role="menuitem"], [tabindex]') || node;
+      const rect = target.getBoundingClientRect();
+      const style = window.getComputedStyle(target);
+      if (rect.width < 5 || rect.height < 5 || style.display === 'none' || style.visibility === 'hidden') return false;
+      target.click();
+      return true;
+    }).catch(() => false);
+
+    if (!clicked) continue;
+    await page.waitForTimeout(1200);
+    if (await isDialogOpen(page)) return true;
+  }
+
+  return false;
+}
+
 async function openComposer(page) {
   // If a composer dialog is already mounted (Page admin auto-opens it), do nothing.
   if (await isDialogOpen(page)) return;
+
+  // LinkedIn's Page-admin Create dialog now renders "Start a post" as a
+  // clickable row/div instead of a button or menuitem. Click its closest real
+  // interactive ancestor and prove that the editor opened.
+  if (await clickLinkedInStartPostCandidate(page)) return;
 
   // Try "Start a post" entry on the feed.
   const startBtn = page.locator(
@@ -37,11 +68,7 @@ async function openComposer(page) {
   if (await createBtn.isVisible().catch(() => false)) {
     await createBtn.click().catch(() => {});
     await page.waitForTimeout(1000);
-    const startPost = page.locator('button:has-text("Start a post"), [role="menuitem"]:has-text("Start a post")').first();
-    if (await startPost.isVisible().catch(() => false)) {
-      await startPost.click().catch(() => {});
-      await page.waitForTimeout(1500);
-    }
+    if (await clickLinkedInStartPostCandidate(page)) return;
   }
 
   // Final wait for the composer.
@@ -262,6 +289,17 @@ async function submitLinkedInPost(page, getPostedUrl) {
     }
     lastError = `LinkedIn composer stayed open after Post click attempt ${attempt}.`;
   }
+  const arbiter = await attemptUploadArbiter(page, {
+    platform: 'LinkedIn social post',
+    checkpoint: 'post-submit confirmation',
+    originalError: lastError || 'LinkedIn post was not confirmed.',
+    submissionAttempted: true,
+    verify: async () => {
+      if (getPostedUrl && await getPostedUrl()) return true;
+      return (await hasLinkedInPostedSignal(page)) || !(await isDialogOpen(page));
+    },
+  });
+  if (arbiter.recovered) return true;
   throw new Error(`${lastError || 'LinkedIn post was not confirmed.'} Post was not published.`);
 }
 
@@ -374,7 +412,20 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
       ? `${description}\n\n${hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)).join(' ')}`
       : (description || '');
 
-    await openComposer(page);
+    try {
+      await openComposer(page);
+    } catch (composerError) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'LinkedIn social post',
+        checkpoint: 'open composer',
+        originalError: composerError.message,
+        allowedClickTexts: ['start a post', 'create'],
+        verify: () => isDialogOpen(page),
+      });
+      if (!arbiter.recovered) {
+        throw new Error(`${composerError.message} AI arbiter could not safely clear the obstacle: ${arbiter.reason}`);
+      }
+    }
 
     // Attach media BEFORE inserting URLs/text. Otherwise LinkedIn may render a
     // large article link preview and our media checks can mistake that preview
@@ -445,4 +496,7 @@ async function uploadToLinkedIn(imagePath, { description, hashtags = [] }, opts 
 }
 
 
-module.exports = { uploadToLinkedIn };
+module.exports = {
+  uploadToLinkedIn,
+  __test: { clickLinkedInStartPostCandidate, isDialogOpen, openComposer },
+};
