@@ -68,6 +68,7 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const { loadImageInput, materializeVisionMessages } = require('./visualMedia');
 const {
   baseHost: qualityBaseHost,
   buildEvidencePacket,
@@ -208,6 +209,48 @@ async function notifyTelegram(settings, message) {
     console.warn('[Telegram] Mirror to chat history failed:', e.message);
   }
   return true;
+}
+
+async function notifyTelegramImage(settings, image, caption = '') {
+  if (!settings.telegram?.chatId) return false;
+  try {
+    const buffer = Buffer.isBuffer(image?.buffer) ? image.buffer : fs.readFileSync(image?.filePath);
+    const mimeType = image?.mimeType || 'image/jpeg';
+    let photoSent = false;
+    if (settings.telegram?.enabled && settings.telegram?.botToken) {
+      const delivery = await sendTelegramPhoto(
+        settings.telegram.botToken,
+        settings.telegram.chatId,
+        buffer,
+        sanitizeOutgoingMessage(caption).slice(0, 1000),
+        settings.backend,
+        { mimeType, fileName: image?.fileName || 'local-visual.jpg' },
+      );
+      photoSent = delivery?.photoSent === true;
+    }
+    const numericChat = Number(settings.telegram.chatId);
+    let mirrored = false;
+    if (Number.isFinite(numericChat) && image?.url) {
+      await supabase.from('telegram_messages').insert({
+        update_id: -Math.floor(Date.now() + Math.random() * 1000),
+        chat_id: numericChat,
+        text: caption.slice(0, 3000),
+        is_bot: true,
+        raw_update: {
+          source: 'local-worker',
+          media: {
+            images: [{ name: image?.fileName || 'local-visual.jpg', type: mimeType, size: buffer.length, url: image.url }],
+            files: [],
+          },
+        },
+      });
+      mirrored = true;
+    }
+    return photoSent || mirrored;
+  } catch (error) {
+    console.warn('[Telegram] Image notification failed:', error.message);
+    return false;
+  }
 }
 
 const uploaders = { youtube: uploadToYouTube, tiktok: uploadToTikTok, instagram: uploadToInstagram };
@@ -891,8 +934,17 @@ app.post('/api/telegram/send', async (req, res) => {
     }
     if (req.body?.photo_base64) {
       const { sendTelegramPhoto } = require('./telegram');
-      await sendTelegramPhoto(settings.telegram.botToken, chatId, Buffer.from(req.body.photo_base64, 'base64'), req.body?.text || '', null);
-      return res.json({ success: true });
+      const photo = await loadImageInput(`data:${req.body?.photo_mime_type || 'image/jpeg'};base64,${req.body.photo_base64}`);
+      const delivery = await sendTelegramPhoto(settings.telegram.botToken, chatId, photo.buffer, req.body?.text || '', null, { mimeType: photo.mimeType });
+      return res.status(delivery?.photoSent === true ? 200 : 502).json({ success: delivery?.photoSent === true });
+    }
+    if (req.body?.photo_url) {
+      const photo = await loadImageInput({ url: req.body.photo_url });
+      const delivery = await sendTelegramPhoto(settings.telegram.botToken, chatId, photo.buffer, req.body?.text || '', null, {
+        mimeType: photo.mimeType,
+        fileName: req.body?.photo_name || 'chat-image',
+      });
+      return res.status(delivery?.photoSent === true ? 200 : 502).json({ success: delivery?.photoSent === true });
     }
     await sendTelegram(settings.telegram.botToken, chatId, req.body?.text || '', null);
     res.json({ success: true });
@@ -1045,7 +1097,7 @@ app.post('/api/local-functions/agent-skills', async (req, res) => {
 
 app.post('/api/agent-run', async (req, res) => {
   try {
-    const { action, runId, prompt, source = 'local-web', telegram_chat_id = null, chat_settings = null, aiSettings = null } = req.body || {};
+    const { action, runId, prompt, images = [], source = 'local-web', telegram_chat_id = null, chat_settings = null, aiSettings = null } = req.body || {};
     if (action === 'cancel' && runId) {
       await supabase.from('agent_runs').update({ status: 'cancelled', completed_at: new Date().toISOString(), error: 'Cancelled by user' }).eq('id', runId);
       return res.json({ ok: true });
@@ -1065,7 +1117,11 @@ app.post('/api/agent-run', async (req, res) => {
       model: `${selectedAI.provider}:${selectedAI.model}`,
     }).select('id').single();
     if (error) throw error;
-    setImmediate(() => runLocalAgent(data.id, runtimePrompt).catch((err) => console.error('[LocalAgent] run failed:', redactSensitiveText(err.message))));
+    const runtimeInput = {
+      prompt: runtimePrompt,
+      images: Array.isArray(images) ? images.filter((image) => image?.url).slice(0, 3) : [],
+    };
+    setImmediate(() => runLocalAgent(data.id, runtimeInput).catch((err) => console.error('[LocalAgent] run failed:', redactSensitiveText(err.message))));
     res.json({ runId: data.id, local: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1330,13 +1386,15 @@ const LOCAL_AGENT_TOOLS = [
 async function runLocalAgent(runId, runtimePrompt = null) {
   const { data: run } = await supabase.from('agent_runs').select('*').eq('id', runId).single();
   if (!run) return;
-  const effectivePrompt = String(runtimePrompt || run.prompt || '').trim();
+  const runtimeInput = runtimePrompt && typeof runtimePrompt === 'object' ? runtimePrompt : { prompt: runtimePrompt };
+  const effectivePrompt = String(runtimeInput.prompt || run.prompt || '').trim();
+  const inputImages = Array.isArray(runtimeInput.images) ? runtimeInput.images.filter((image) => image?.url).slice(0, 3) : [];
   const settings = await getSettings().catch(() => null);
   const config = await resolveSelectedAIConfig(run.chat_settings || null);
   try {
     await appendAgentEvent(runId, { type: 'preflight_ok', component: 'local_worker', alive: true, message: `Local worker connected · ${config.label}` });
 
-    const browserInput = directLocalBrowserInput(effectivePrompt);
+    const browserInput = inputImages.length === 0 ? directLocalBrowserInput(effectivePrompt) : null;
     if (browserInput) {
       await appendAgentEvent(runId, { type: 'tool_call', name: 'browser_task', label: 'Direct local Chromium task' });
       const session = await createLocalBrowserSession(supabase, {
@@ -1346,6 +1404,12 @@ async function runLocalAgent(runId, runtimePrompt = null) {
       });
       const completedSession = await enqueueLocalBrowserSession(supabase, session.id, {
         notify: settings ? (message) => notifyTelegram(settings, message) : null,
+        notifyImage: settings ? ({ filePath, sessionId, caption }) => notifyTelegramImage(settings, {
+          filePath,
+          fileName: `browser-${sessionId}.jpg`,
+          mimeType: 'image/jpeg',
+          url: `${settings.local_agent_url || 'http://localhost:3001'}/api/local-browser/sessions/${encodeURIComponent(sessionId)}/screenshot`,
+        }, caption) : null,
       });
       const summary = completedSession.summary || 'Local Chromium task finished.';
       await appendAgentEvent(runId, { type: 'tool_result', name: 'browser_task', ok: completedSession.status === 'completed', summary, data: { session_id: session.id } });
@@ -1374,10 +1438,15 @@ async function runLocalAgent(runId, runtimePrompt = null) {
       await appendAgentEvent(runId, { type: 'tool_result', name: 'research_deep', ok: true, summary: `Found ${sources.length} sources locally.`, data: { sources } });
     }
 
-    const reply = await localChatCompletion([
+    const vision = await materializeVisionMessages([
       { role: 'system', content: `You are a local-worker autonomous agent using the selected LLM provider (${config.label}). Do not mention cloud credits. Be concise and include useful sources when provided.` },
-      { role: 'user', content: `${effectivePrompt}${researchContext ? `\n\nLocal research sources:\n${researchContext}` : ''}` },
-    ], { max_tokens: 700, temperature: 0.2, aiSettings: run.chat_settings || null });
+      {
+        role: 'user',
+        content: `${effectivePrompt}${researchContext ? `\n\nLocal research sources:\n${researchContext}` : ''}`,
+        images: inputImages,
+      },
+    ], { strictLastUser: true });
+    const reply = await localChatCompletion(vision.messages, { max_tokens: 700, temperature: 0.2, aiSettings: run.chat_settings || null });
     const summary = reply?.choices?.[0]?.message?.content || 'Done.';
     const publicSummary = redactSensitiveText(summary);
     await appendAgentEvent(runId, { type: 'finish', summary: publicSummary });
@@ -2482,6 +2551,12 @@ app.post('/api/local-browser/run', async (req, res) => {
     const settings = await getSettings().catch(() => null);
     setImmediate(() => enqueueLocalBrowserSession(supabase, session.id, {
       notify: settings ? (message) => notifyTelegram(settings, message) : null,
+      notifyImage: settings ? ({ filePath, sessionId, caption }) => notifyTelegramImage(settings, {
+        filePath,
+        fileName: `browser-${sessionId}.jpg`,
+        mimeType: 'image/jpeg',
+        url: `${settings.local_agent_url || 'http://localhost:3001'}/api/local-browser/sessions/${encodeURIComponent(sessionId)}/screenshot`,
+      }, caption) : null,
     }).catch((error) => console.error(`[LocalBrowser] Session ${session.id} failed:`, error.message)));
     res.json({
       ok: true,
@@ -3884,6 +3959,9 @@ async function processPendingCommands() {
               cmd.args,
               (_botToken, chatId, message) => sendTelegram(settings.telegram.botToken, chatId, message, null),
               null,
+              (_botToken, chatId, buffer, caption, _backend, options) => sendTelegramPhoto(
+                settings.telegram.botToken, chatId, buffer, caption, null, options,
+              ),
             );
             await supabase.from('pending_commands').update({
               status: 'completed',
@@ -4016,8 +4094,10 @@ async function processPendingCommands() {
         } catch (err) {
           const publicError = redactSensitiveText(err.message || String(err));
           console.error(`[Commands] Command ${cmd.id} failed:`, publicError);
+          const nextAttempts = Number(cmd.attempts || 0) + 1;
+          const retryableAIResponse = cmd.command === 'ai_response' && nextAttempts < 5;
           const settingsForError = await getSettings().catch(() => null);
-          if (settingsForError) {
+          if (settingsForError && !retryableAIResponse) {
             const isStats = cmd.command === 'check_stats';
             const errMsg = isStats
               ? `❌ Stats check failed: ${publicError}\n\nThis usually means:\n1. The browser could not open (Playwright not installed?)\n2. The platform session needs login — upload a video first to save the session\n3. The platform website changed its layout\n\nTip: Make sure smart-launcher.bat is running and you have uploaded at least one video to the platform.`
@@ -4025,7 +4105,10 @@ async function processPendingCommands() {
             await notifyTelegram(settingsForError, errMsg);
           }
           await supabase.from('pending_commands').update({
-            status: 'failed', result: publicError, completed_at: new Date().toISOString(),
+            status: retryableAIResponse ? 'pending' : 'failed',
+            attempts: nextAttempts,
+            result: publicError,
+            completed_at: retryableAIResponse ? null : new Date().toISOString(),
           }).eq('id', cmd.id).catch(() => {});
         } finally {
           runningCommands.delete(cmd.id);

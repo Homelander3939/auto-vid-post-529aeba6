@@ -13,7 +13,7 @@ import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import ReactMarkdown from 'react-markdown';
 import AgentRunPanel from '@/components/AgentRunPanel';
-import { buildAgentRunPrompt, shouldLaunchAgentRun } from '@/lib/agentChat';
+import { buildAgentRunPrompt, extractMarkdownImageUrls, shouldLaunchAgentRun } from '@/lib/agentChat';
 
 /* ── Types ───────────────────────────────────────────── */
 
@@ -80,6 +80,8 @@ const APP_CHAT_STORAGE_KEY = 'ai-chat-browser-history-v1';
 const MAX_STORED_MESSAGES = 200;
 const BROWSER_MIRROR_SOURCE = 'browser-mirror';
 const MAX_TEXT_ATTACHMENT_LENGTH = 10_000;
+const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const AGENT_RUN_MARKER_PREFIX = '__AGENT_RUN__:';
 const AGENT_RUN_MARKER_RE = new RegExp(`${AGENT_RUN_MARKER_PREFIX}([0-9a-f-]+)`, 'g');
 const AGENT_RUN_MARKER_LINE_RE = new RegExp(`${AGENT_RUN_MARKER_PREFIX}[0-9a-f-]+\\n?`, 'g');
@@ -364,30 +366,11 @@ export default function AIChat() {
   const mirrorImageToTelegram = useCallback(async (file: FileAttachment, caption?: string) => {
     if (!telegramEnabled || !resolvedChatId || !file.url) return;
     try {
-      const response = await fetch(file.url);
-      const blob = await response.blob();
-      const reader = new FileReader();
-      const base64 = await new Promise<string>((resolve, reject) => {
-        reader.onload = () => {
-          if (typeof reader.result !== 'string' || !reader.result.includes(',')) {
-            reject(new Error('Invalid image data'));
-            return;
-          }
-          const [, data] = reader.result.split(',', 2);
-          if (!data) {
-            reject(new Error('Invalid image data'));
-            return;
-          }
-          resolve(data);
-        };
-        reader.onerror = () => reject(reader.error || new Error('Failed to read image'));
-        reader.readAsDataURL(blob);
-      });
       const body = {
         chat_id: resolvedChatId,
         text: caption?.slice(0, 1000),
-        photo_base64: base64,
-        photo_mime_type: file.type || blob.type || 'image/png',
+        photo_url: file.url,
+        photo_name: file.name,
       };
       const sentLocal = await sendLocalTelegram(body);
       if (!sentLocal) throw new Error('Local Telegram photo send failed');
@@ -478,6 +461,14 @@ export default function AIChat() {
     if (!files) return;
     for (const file of Array.from(files)) {
       const isImage = file.type.startsWith('image/');
+      if (isImage && !ALLOWED_IMAGE_TYPES.has(file.type.toLowerCase())) {
+        toast({ title: 'Unsupported image', description: 'Use JPEG, PNG, WebP, or GIF.', variant: 'destructive' });
+        continue;
+      }
+      if (isImage && file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        toast({ title: 'Image too large', description: 'Images must be 10 MB or smaller for local vision.', variant: 'destructive' });
+        continue;
+      }
       const sizeStr = file.size < 1024 * 1024
         ? `${(file.size / 1024).toFixed(0)} KB`
         : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
@@ -562,7 +553,9 @@ export default function AIChat() {
       });
     };
 
-    const contextMsgs: ChatContextMessage[] = appMessages.slice(-8).map((m) => {
+    // Use the merged app + Telegram history so a photo sent in either surface
+    // remains visible to a follow-up question typed in the other surface.
+    const contextMsgs: ChatContextMessage[] = messages.slice(-8).map((m) => {
       const base: ChatContextMessage = { role: m.role, content: m.content.slice(0, 1800) };
       if (m.images) base.images = m.images;
       if (m.files?.some((f) => !f.isImage)) {
@@ -584,6 +577,7 @@ export default function AIChat() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: agentPrompt,
+            images: imageFiles.map((file) => ({ name: file.name, type: file.type, url: file.url, isImage: true })),
             source: 'ai-chat',
             telegram_chat_id: resolvedChatId || null,
             chat_settings: settings ? {
@@ -648,6 +642,16 @@ Open the activity panel on the right if you want to follow the process flow whil
           // Mirror AI response to Telegram
           if (telegramEnabled && resolvedChatId && assistantSoFar.trim()) {
             void mirrorBrowserMessage('AI', assistantSoFar);
+            for (const [index, url] of extractMarkdownImageUrls(assistantSoFar).entries()) {
+              void mirrorImageToTelegram({
+                id: `assistant-image-${index}`,
+                name: `assistant-image-${index + 1}`,
+                type: 'image/jpeg',
+                size: 'image',
+                url,
+                isImage: true,
+              });
+            }
           }
         },
         onError: (err) => {

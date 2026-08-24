@@ -406,6 +406,13 @@ async function prepareAuthenticatedTaskPage(page, startUrl, permissions = {}) {
 
 async function runLocalBrowserSession(supabase, id, options = {}) {
   const notify = typeof options.notify === 'function' ? options.notify : null;
+  const notifyImage = typeof options.notifyImage === 'function' ? options.notifyImage : null;
+  const notifyFinalScreenshot = async (caption) => {
+    if (!notifyImage) return;
+    const filePath = screenshotPath(id);
+    if (!fs.existsSync(filePath)) return;
+    await notifyImage({ filePath, sessionId: id, caption }).catch(() => null);
+  };
   const initial = await readSession(supabase, id);
   const privateTask = privateSessionTasks.get(id);
   if (initial.has_private_input === true && !privateTask) {
@@ -506,6 +513,7 @@ async function runLocalBrowserSession(supabase, id, options = {}) {
         }], { hasPrivateInput: initial.has_private_input === true }),
       });
       if (notify) await notify(summary);
+      await notifyFinalScreenshot(`Final local Chromium view\n${outcome}`);
       return await readSession(supabase, id);
     }
 
@@ -602,6 +610,7 @@ async function runLocalBrowserSession(supabase, id, options = {}) {
       }),
     });
     if (notify) await notify(summary);
+    await notifyFinalScreenshot(`Final local Chromium view\n${outcome}`);
     return await readSession(supabase, id);
   } catch (error) {
     const message = oneLine(error.message || error, 1500);
@@ -612,6 +621,7 @@ async function runLocalBrowserSession(supabase, id, options = {}) {
       summary: `❌ Local Chromium task failed: ${message}`,
     }).catch(() => null);
     if (notify) await notify(`❌ Local Chromium task failed\n${publicTask}\n${message}`).catch(() => null);
+    await notifyFinalScreenshot(`Local Chromium stopped\n${message}`);
     throw error;
   } finally {
     privateSessionTasks.delete(id);

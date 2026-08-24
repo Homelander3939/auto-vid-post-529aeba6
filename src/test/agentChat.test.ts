@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAgentRunPrompt, shouldLaunchAgentRun } from '@/lib/agentChat';
+import { buildAgentRunPrompt, extractMarkdownImageUrls, shouldLaunchAgentRun } from '@/lib/agentChat';
 
 describe('agentChat helpers', () => {
   it('detects complex agentic prompts', () => {
@@ -44,5 +44,11 @@ describe('agentChat helpers', () => {
     expect(prompt).toContain('Create the app');
     expect(prompt).toContain('brief.md');
     expect(prompt).toContain('Show live progress in the app.');
+  });
+
+  it('extracts assistant image URLs once for Telegram mirroring', () => {
+    expect(extractMarkdownImageUrls(
+      '![preview](http://localhost:3001/a.jpg) ![same](http://localhost:3001/a.jpg) ![remote](https://example.com/b.png)',
+    )).toEqual(['http://localhost:3001/a.jpg', 'https://example.com/b.png']);
   });
 });

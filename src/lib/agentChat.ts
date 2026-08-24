@@ -7,6 +7,19 @@ export interface AgentChatAttachment {
   isImage?: boolean;
 }
 
+export function extractMarkdownImageUrls(text: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const pattern = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/gi;
+  for (const match of text.matchAll(pattern)) {
+    if (!seen.has(match[1])) {
+      seen.add(match[1]);
+      urls.push(match[1]);
+    }
+  }
+  return urls.slice(0, 4);
+}
+
 // IMPORTANT: This heuristic is mirrored on the backend at
 // `supabase/functions/_shared/agent-intent.ts`. The backend version is the
 // authoritative one (used by ai-chat to decide whether to launch run_agent

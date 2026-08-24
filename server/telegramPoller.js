@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { responseToValidatedImage } = require('./visualMedia');
 
 const STATE_TABLE = 'telegram_bot_state';
 const STATE_ID = 'local-ai-poller';
@@ -12,11 +13,38 @@ function commandId(updateId) {
   return `telegram-ai-${Number(updateId)}`;
 }
 
+function telegramImageCandidates(message) {
+  const candidates = [];
+  const photos = Array.isArray(message?.photo) ? message.photo.filter((item) => item?.file_id) : [];
+  if (photos.length > 0) {
+    const photo = [...photos].sort((a, b) => Number(b.file_size || 0) - Number(a.file_size || 0))[0];
+    candidates.push({
+      fileId: photo.file_id,
+      uniqueId: photo.file_unique_id || null,
+      name: `telegram-photo-${message.message_id || Date.now()}.jpg`,
+      type: 'image/jpeg',
+      size: Number(photo.file_size || 0),
+    });
+  }
+  const document = message?.document;
+  if (document?.file_id && String(document.mime_type || '').startsWith('image/')) {
+    candidates.push({
+      fileId: document.file_id,
+      uniqueId: document.file_unique_id || null,
+      name: document.file_name || `telegram-image-${message.message_id || Date.now()}`,
+      type: document.mime_type,
+      size: Number(document.file_size || 0),
+    });
+  }
+  return candidates;
+}
+
 function extractTelegramMessage(update) {
   const message = update?.message || update?.edited_message;
   if (!message || message?.from?.is_bot) return null;
   const text = String(message.text || message.caption || '').trim();
-  if (!text) return null;
+  const imageCandidates = telegramImageCandidates(message);
+  if (!text && imageCandidates.length === 0) return null;
   return {
     updateId: Number(update.update_id),
     chatId: message.chat?.id,
@@ -25,6 +53,7 @@ function extractTelegramMessage(update) {
     text,
     edited: Boolean(update.edited_message),
     hasAttachments: Boolean(message.photo || message.document || message.video || message.audio || message.voice),
+    imageCandidates,
   };
 }
 
@@ -51,6 +80,38 @@ async function telegramApi(botToken, method, payload = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function hydrateTelegramImages(botToken, incoming, supabase, options = {}) {
+  const images = [];
+  for (const [index, candidate] of (incoming.imageCandidates || []).entries()) {
+    if (candidate.size > 10 * 1024 * 1024) throw new Error('Telegram image exceeds the 10 MB local vision limit');
+    const file = await (options.telegramApiImpl || telegramApi)(botToken, 'getFile', { file_id: candidate.fileId });
+    if (!file?.file_path) throw new Error('Telegram did not return an image file path');
+    const response = await (options.fetchImpl || fetch)(`https://api.telegram.org/file/bot${botToken}/${file.file_path}`);
+    const validated = await responseToValidatedImage(response, { declaredType: candidate.type });
+    const extension = validated.mimeType === 'image/png' ? 'png'
+      : validated.mimeType === 'image/webp' ? 'webp'
+        : validated.mimeType === 'image/gif' ? 'gif' : 'jpg';
+    const safeBase = String(candidate.name || `telegram-image-${index + 1}`)
+      .replace(/\.[a-z0-9]+$/i, '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80) || `telegram-image-${index + 1}`;
+    const storagePath = `telegram/${incoming.chatId}/${incoming.updateId}-${index}-${safeBase}.${extension}`;
+    const { error } = await supabase.storage.from('videos').upload(storagePath, validated.buffer, {
+      contentType: validated.mimeType,
+      upsert: true,
+    });
+    if (error) throw new Error(error.message || String(error));
+    const { data } = supabase.storage.from('videos').getPublicUrl(storagePath);
+    images.push({
+      name: `${safeBase}.${extension}`,
+      type: validated.mimeType,
+      size: validated.byteLength,
+      url: data.publicUrl,
+      storage_path: storagePath,
+      telegram_file_unique_id: candidate.uniqueId,
+    });
+  }
+  return images;
 }
 
 async function readOne(supabase, table, column, value) {
@@ -85,13 +146,18 @@ async function persistInboundUpdate(supabase, incoming) {
         message_date: incoming.messageDate,
         edited: incoming.edited,
         has_attachments: incoming.hasAttachments,
+        media: {
+          images: Array.isArray(incoming.images) ? incoming.images : [],
+          files: [],
+        },
+        visual_error: incoming.visualError || null,
       },
     });
     if (error) throw new Error(error.message || String(error));
   }
 
   const existingCommand = await readOne(supabase, 'pending_commands', 'id', commandId(incoming.updateId));
-  if (!existingCommand) {
+  if (incoming.text && !existingCommand) {
     const { error } = await supabase.from('pending_commands').insert({
       id: commandId(incoming.updateId),
       command: 'ai_response',
@@ -99,7 +165,7 @@ async function persistInboundUpdate(supabase, incoming) {
         update_id: incoming.updateId,
         chat_id: incoming.chatId,
         user_text: incoming.text,
-        images: [],
+        images: Array.isArray(incoming.images) ? incoming.images : [],
         files: [],
         source: 'local-telegram-poller',
       },
@@ -176,8 +242,15 @@ function startLocalTelegramPoller({ supabase, getSettings, intervalMs = DEFAULT_
         if (!Number.isFinite(updateId)) continue;
         const incoming = extractTelegramMessage(update);
         if (incoming && (!telegram.chatId || sameChat(incoming.chatId, telegram.chatId))) {
+          try {
+            incoming.images = await hydrateTelegramImages(telegram.botToken, incoming, supabase);
+          } catch (error) {
+            incoming.images = [];
+            incoming.visualError = String(error.message || error).slice(0, 300);
+            if (!incoming.text) incoming.text = `The attached image could not be imported for local vision: ${incoming.visualError}`;
+          }
           await persistInboundUpdate(supabase, incoming);
-          console.log(`[TelegramPoller] Stored inbound update ${incoming.updateId} and queued one local AI response.`);
+          console.log(`[TelegramPoller] Stored inbound update ${incoming.updateId}${incoming.text ? ' and queued one local AI response' : ' with local visual context'}.`);
         } else if (incoming && telegram.chatId && !sameChat(incoming.chatId, telegram.chatId)) {
           console.warn(`[TelegramPoller] Ignored update ${updateId} from an unconfigured chat.`);
         }
@@ -217,8 +290,10 @@ function startLocalTelegramPoller({ supabase, getSettings, intervalMs = DEFAULT_
 module.exports = {
   commandId,
   extractTelegramMessage,
+  hydrateTelegramImages,
   inboundMessageId,
   persistInboundUpdate,
   recoverInterruptedCommands,
   startLocalTelegramPoller,
+  telegramImageCandidates,
 };

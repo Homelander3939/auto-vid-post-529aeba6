@@ -21,6 +21,12 @@ const {
   focusedExecutionDirective,
   selectToolsForMessages,
 } = require('./agentKernel');
+const {
+  extractMarkdownImageUrls,
+  loadImageInput,
+  materializeVisionMessages,
+  messageText,
+} = require('./visualMedia');
 
 let LM_STUDIO_URL = normalizeLMStudioUrl(process.env.LM_STUDIO_URL || 'http://localhost:1234');
 let LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'qwen3.8-27b-uncensored-aggressive';
@@ -1901,7 +1907,17 @@ function compactSystemContent(content, maxChars = 12_500) {
 }
 
 function messageCost(message) {
-  try { return JSON.stringify(message).length; } catch { return String(message?.content || '').length + 100; }
+  try {
+    if (Array.isArray(message?.content)) {
+      const contentCost = message.content.reduce((sum, part) => {
+        if (part?.type === 'text') return sum + String(part.text || '').length;
+        if (part?.type === 'image_url') return sum + 600;
+        return sum + 100;
+      }, 0);
+      return contentCost + 150;
+    }
+    return JSON.stringify(message).length;
+  } catch { return String(message?.content || '').length + 100; }
 }
 
 function boundInitialModelMessages(messages, options = {}) {
@@ -2114,7 +2130,8 @@ ${formatting}`;
 /* ── Call LM Studio with tool support ─── */
 async function callLMStudioWithTools(messages, supabase, maxRounds = 3, availableTools = tools) {
   await refreshLMStudioConfigFromSettings(supabase);
-  let fullMessages = boundInitialModelMessages(messages);
+  const vision = await materializeVisionMessages(messages, { strictLastUser: true });
+  let fullMessages = boundInitialModelMessages(vision.messages);
   const routing = selectToolsForMessages(availableTools, fullMessages);
   const requestTools = isSimpleGreeting(fullMessages) ? [] : routing.tools;
   const directive = focusedExecutionDirective(routing.task, routing.names);
@@ -2223,7 +2240,7 @@ async function streamLMStudio(messages, supabase) {
   // as a single SSE message so the chat shows the actual answer instead of
   // letting the LLM hallucinate a "queued" placeholder.
   const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
-  const lastUserText = typeof lastUser?.content === 'string' ? lastUser.content : '';
+  const lastUserText = messageText(lastUser?.content);
   const explicitBrowserInput = explicitLocalBrowserSkillInput(lastUserText);
   if (explicitBrowserInput) {
     const result = await executeAgentSkill(supabase, {
@@ -2260,12 +2277,16 @@ async function streamLMStudio(messages, supabase) {
     return makeSseStreamFromText(imageLine + reportMd + linkLine);
   }
 
-  const routing = selectToolsForMessages(tools, messages);
+  const vision = await materializeVisionMessages(messages, { strictLastUser: true });
+  const routing = selectToolsForMessages(tools, vision.messages);
   const requestTools = isSimpleGreeting(messages) ? [] : routing.tools;
-  const focusedPrompt = `${systemPrompt}${focusedExecutionDirective(routing.task, routing.names)}`;
+  const visionDirective = vision.imageCount > 0
+    ? '\n\nVISUAL INPUT: One or more real images are attached in the conversation. Inspect their pixels directly and answer from what is visibly present. Never claim that you cannot see an attached image. If text is unclear, state exactly which part is unreadable instead of inventing it.'
+    : '';
+  const focusedPrompt = `${systemPrompt}${visionDirective}${focusedExecutionDirective(routing.task, routing.names)}`;
   const fullMessages = boundInitialModelMessages([
     { role: 'system', content: focusedPrompt },
-    ...messages,
+    ...vision.messages,
   ]);
 
   // First try non-streaming to detect tool calls
@@ -2342,7 +2363,7 @@ async function streamLMStudio(messages, supabase) {
 }
 
 /* ── Process a Telegram AI response command ─── */
-async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend) {
+async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend, sendTelegramPhotoFn = null) {
   const chatId = args.chat_id;
   const userText = args.user_text || '';
   const images = args.images || [];
@@ -2352,22 +2373,57 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
   const replyUpdateId = updateId + 1_000_000_000;
   const replyId = `telegram-out-${updateId}`;
 
+  async function deliverImages(imageRows, previous = []) {
+    const byUrl = new Map((previous || []).map((item) => [item?.url, item]));
+    const results = [];
+    for (const image of imageRows || []) {
+      const prior = byUrl.get(image.url);
+      if (prior?.sent === true) { results.push(prior); continue; }
+      if (typeof sendTelegramPhotoFn !== 'function') {
+        results.push({ url: image.url, sent: false, error: 'Telegram photo sender is unavailable' });
+        continue;
+      }
+      try {
+        const loaded = await loadImageInput(image);
+        const photoDelivery = await sendTelegramPhotoFn(null, chatId, loaded.buffer, '', backend, {
+          mimeType: loaded.mimeType,
+          fileName: image.name || 'ai-image',
+        });
+        results.push({ url: image.url, sent: photoDelivery?.photoSent === true });
+      } catch (error) {
+        results.push({ url: image.url, sent: false, error: String(error.message || error).slice(0, 240) });
+      }
+    }
+    return results;
+  }
+
   const { data: existingReply, error: existingReplyError } = await supabase
     .from('telegram_messages').select('*').eq('update_id', replyUpdateId).maybeSingle();
   if (existingReplyError) throw new Error(existingReplyError.message || String(existingReplyError));
   if (existingReply) {
-    if (existingReply.raw_update?.telegram_sent !== true) {
+    const existingRaw = existingReply.raw_update || {};
+    let textSent = existingRaw.text_sent === true || existingRaw.telegram_sent === true;
+    let telegramMessageId = existingRaw.telegram_message_id || null;
+    if (!textSent) {
       const delivery = await sendTelegramFn(null, chatId, sanitizeTelegramReply(existingReply.text), backend);
       if (!delivery) throw new Error('Telegram reply delivery returned no confirmation');
-      await supabase.from('telegram_messages').update({
-        raw_update: {
-          ...(existingReply.raw_update || {}),
-          telegram_sent: true,
-          telegram_message_id: delivery?.result?.message_id || null,
-          delivered_at: new Date().toISOString(),
-        },
-      }).eq('id', existingReply.id);
+      textSent = true;
+      telegramMessageId = delivery?.result?.message_id || null;
     }
+    const existingImages = Array.isArray(existingRaw.media?.images) ? existingRaw.media.images : [];
+    const photoDeliveries = await deliverImages(existingImages, existingRaw.photo_deliveries || []);
+    const photosSent = photoDeliveries.every((item) => item.sent === true);
+    await supabase.from('telegram_messages').update({
+      raw_update: {
+        ...existingRaw,
+        text_sent: textSent,
+        telegram_sent: textSent && photosSent,
+        telegram_message_id: telegramMessageId,
+        ...(photoDeliveries.length > 0 ? { photo_deliveries: photoDeliveries } : {}),
+        delivered_at: textSent && photosSent ? new Date().toISOString() : existingRaw.delivered_at || null,
+      },
+    }).eq('id', existingReply.id);
+    if (!photosSent) throw new Error('Telegram image delivery is incomplete and will be retried');
     return existingReply.text || '';
   }
 
@@ -2375,10 +2431,24 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
     const allowedEmails = (await recentBrowserSessions(supabase, 8))
       .flatMap(browserPublicEmails);
     const cleanReply = redactSensitiveText(sanitizeTelegramReply(reply), { allowedEmails });
+    const explicitImages = Array.isArray(metadata?.images) ? metadata.images.filter((item) => item?.url) : [];
+    const replyImages = extractMarkdownImageUrls(cleanReply).map((url, index) => ({
+      name: `ai-image-${index + 1}`,
+      type: 'image/jpeg',
+      url,
+    }));
+    const mirroredImages = [...explicitImages, ...replyImages]
+      .filter((item, index, rows) => rows.findIndex((row) => row.url === item.url) === index)
+      .slice(0, 4);
     const baseRawUpdate = {
       bot_reply: true,
       source: 'local-telegram-poller',
+      text_sent: Boolean(alreadySent),
       telegram_sent: Boolean(alreadySent),
+      ...(mirroredImages.length > 0 ? { media: { images: mirroredImages, files: [] } } : {}),
+      ...(alreadySent && mirroredImages.length > 0
+        ? { photo_deliveries: mirroredImages.map((image) => ({ url: image.url, sent: true })) }
+        : {}),
       ...metadata,
     };
     const { error: insertError } = await supabase.from('telegram_messages').insert({
@@ -2392,22 +2462,29 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
     if (insertError) throw new Error(insertError.message || String(insertError));
 
     if (alreadySent) return cleanReply;
+    let deliveryRawUpdate = baseRawUpdate;
     try {
       const delivery = await sendTelegramFn(null, chatId, cleanReply, backend);
       if (!delivery) throw new Error('Telegram reply delivery returned no confirmation');
+      const photoDeliveries = await deliverImages(mirroredImages);
+      const photosSent = photoDeliveries.every((item) => item.sent === true);
+      deliveryRawUpdate = {
+        ...baseRawUpdate,
+        text_sent: true,
+        telegram_sent: photosSent,
+        telegram_message_id: delivery?.result?.message_id || null,
+        ...(photoDeliveries.length > 0 ? { photo_deliveries: photoDeliveries } : {}),
+        delivered_at: photosSent ? new Date().toISOString() : null,
+      };
       await supabase.from('telegram_messages').update({
-        raw_update: {
-          ...baseRawUpdate,
-          telegram_sent: true,
-          telegram_message_id: delivery?.result?.message_id || null,
-          delivered_at: new Date().toISOString(),
-        },
+        raw_update: deliveryRawUpdate,
       }).eq('id', replyId);
+      if (!photosSent) throw new Error('Telegram image delivery is incomplete and will be retried');
       return cleanReply;
     } catch (error) {
       await supabase.from('telegram_messages').update({
         raw_update: {
-          ...baseRawUpdate,
+          ...deliveryRawUpdate,
           telegram_sent: false,
           delivery_error: String(error.message || error).slice(0, 500),
         },
@@ -2425,7 +2502,10 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
       const isStructured = typeof routedReply === 'object' && routedReply !== null;
       const replyText = isStructured ? (routedReply.report || '') : String(routedReply);
       const alreadySent = isStructured && routedReply.telegramSent === true;
-      return persistAndDeliver(replyText, { routed: true, structured: isStructured }, alreadySent);
+      const routedImages = isStructured && routedReply.imageUrl
+        ? [{ name: 'research-image', type: 'image/jpeg', url: routedReply.imageUrl }]
+        : [];
+      return persistAndDeliver(replyText, { routed: true, structured: isStructured, images: routedImages }, alreadySent);
     }
   } catch (routeErr) {
     console.warn('[AI] Deterministic Telegram routing failed, falling back to LM Studio:', routeErr.message);
@@ -2443,6 +2523,7 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
     .map(m => ({
       role: m.is_bot ? 'assistant' : 'user',
       content: compactMessageContent(m.text || '', 1400),
+      images: Array.isArray(m.raw_update?.media?.images) ? m.raw_update.media.images : [],
     }));
 
   // Build current message with file context
@@ -2457,8 +2538,9 @@ async function processTelegramAIResponse(supabase, args, sendTelegramFn, backend
   // Replace last user message with enriched version
   if (contextMessages.length > 0 && contextMessages[contextMessages.length - 1].role === 'user') {
     contextMessages[contextMessages.length - 1].content = currentContent;
+    if (images.length > 0) contextMessages[contextMessages.length - 1].images = images;
   } else {
-    contextMessages.push({ role: 'user', content: currentContent });
+    contextMessages.push({ role: 'user', content: currentContent, images });
   }
 
   // Get app context and build system prompt
