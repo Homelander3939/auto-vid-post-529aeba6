@@ -538,7 +538,7 @@ async function getProviderMap(supabase: any) {
   const rawModel = (s.ai_model || DEFAULT_LOVABLE_MODEL) as string;
   // For the lovable provider (or when no custom API key is available), ensure the model is
   // always a valid Lovable Gateway model. This prevents raw user-entered models like
-  // "qwen/qwen3.5-397b-a17b" from being sent to the Lovable Gateway and rejected.
+  // a local LM Studio model ID from being sent to the Lovable Gateway and rejected.
   const chatModel = (!rawApiKey || rawProvider === 'lovable')
     ? normalizeLovableModel(rawModel)
     : rawModel;

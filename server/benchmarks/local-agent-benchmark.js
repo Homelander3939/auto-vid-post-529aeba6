@@ -93,12 +93,12 @@ async function runOfflineCases() {
       return factsFound;
     }),
     runCase('stale-selector-recovery', 'Recover from a stale selector and expand context only after real difficulty.', async () => {
-      const focused = browserObservationBudget('Find the contact link.', [], { contextLength: 10240, vision: true });
+      const focused = browserObservationBudget('Find the contact link.', [], { contextLength: 16384, vision: true });
       const history = [
         { action: 'click', ok: false, stateChanged: false }, { action: 'observe', ok: false },
         { action: 'click', ok: false, stateChanged: false }, { action: 'done', ok: false, completionRejected: true },
       ];
-      const recovery = browserObservationBudget('Click Next and continue.', history, { contextLength: 10240, vision: true });
+      const recovery = browserObservationBudget('Click Next and continue.', history, { contextLength: 16384, vision: true });
       const view = compactBrowserObservation({
         url: 'https://example.test/wizard', title: 'Wizard', bodyText: 'Continue setup', landmarks: ['Setup'], discoveredLinks: [],
         interactive: [

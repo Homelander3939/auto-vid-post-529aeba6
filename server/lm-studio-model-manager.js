@@ -15,10 +15,10 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_BASE_URL = 'http://127.0.0.1:1234';
 const DEFAULT_MODEL = 'qwen3.8-27b-uncensored-aggressive';
 const MANAGED_IDENTIFIER = 'uploader-local-agent';
-// 10K is a conservative ceiling for the 27B Q4 model on the user's RTX 3090.
-// It leaves materially more room for app state + tools than 8K without the
-// VRAM jump of a 16K/32K load.
-const DEFAULT_CONTEXT_LENGTH = 10240;
+// One shared 16K/parallel-1 profile is used by the uploader, its browser
+// agent, the upload arbiter, and Fantasai's story stage. Never allow a stale
+// setting to load a second large LLM beside it.
+const DEFAULT_CONTEXT_LENGTH = 16384;
 const DEFAULT_GPU_OFFLOAD = 'max';
 let transitionTail = Promise.resolve();
 
@@ -49,7 +49,9 @@ function flattenLoadedLLMs(models) {
 
 function planSingleModelTransition(models, preferredModel = DEFAULT_MODEL, loadIfMissing = true, requiredContextLength = 0) {
   const compatible = (models || []).filter(isAgentLLM);
-  const preferred = String(preferredModel || DEFAULT_MODEL).trim().toLowerCase();
+  // preferredModel remains in the public signature for compatibility, but
+  // local mode is intentionally pinned to the one approved model.
+  const preferred = DEFAULT_MODEL.toLowerCase();
   const selected = compatible.find((model) => String(model.key || '').toLowerCase() === preferred
     || (Array.isArray(model.loadedInstances) ? model.loadedInstances : [])
       .some((instance) => String(instance?.id || '').toLowerCase() === preferred));
@@ -59,7 +61,8 @@ function planSingleModelTransition(models, preferredModel = DEFAULT_MODEL, loadI
   const selectedKey = String(selected.key || '').toLowerCase();
   const minimumContext = Math.max(0, Number(requiredContextLength || 0));
   const keep = loaded.find((instance) => instance.key.toLowerCase() === selectedKey
-    && (!minimumContext || Number(instance.contextLength || 0) >= minimumContext)) || null;
+    && String(instance.id || '') === MANAGED_IDENTIFIER
+    && (!minimumContext || Number(instance.contextLength || 0) === minimumContext)) || null;
   return {
     selected,
     keep,
@@ -189,12 +192,18 @@ async function waitForManagedModel(baseUrl, selectedKey, timeoutMs = 180000) {
 async function ensureSingleLocalLLM(options = {}) {
   return runExclusive(async () => {
     const baseUrl = normalizeBaseUrl(options.baseUrl || DEFAULT_BASE_URL);
-    const preferredModel = String(options.preferredModel || DEFAULT_MODEL).trim();
+    const preferredModel = DEFAULT_MODEL;
     const loadIfMissing = options.loadIfMissing !== false;
-    const contextLength = Math.max(4096, Number(options.contextLength || DEFAULT_CONTEXT_LENGTH));
+    const contextLength = DEFAULT_CONTEXT_LENGTH;
     await ensureLocalServer(baseUrl);
     let inventory = await readModelInventory(baseUrl);
-    const preserved = options.preserveLoaded === true ? singleLoadedModel(inventory) : null;
+    const preservedCandidate = options.preserveLoaded === true ? singleLoadedModel(inventory) : null;
+    const preserved = preservedCandidate
+      && String(preservedCandidate.key || '').toLowerCase() === DEFAULT_MODEL.toLowerCase()
+      && preservedCandidate.id === MANAGED_IDENTIFIER
+      && Number(preservedCandidate.contextLength || 0) === contextLength
+      ? preservedCandidate
+      : null;
     if (preserved) {
       console.log(`[LMStudioGuard] Reusing the factory's only loaded LLM: ${preserved.id} (${preserved.key}).`);
       return {

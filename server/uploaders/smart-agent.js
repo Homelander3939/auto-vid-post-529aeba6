@@ -36,7 +36,8 @@ const {
 const { getTikTokPageDescription, isTikTokPublishedUrl, isTikTokUploadUrl } = require('./tiktok-state');
 
 // LM Studio local model configuration
-// Override with env vars: LM_STUDIO_URL, LM_STUDIO_MODEL, LM_STUDIO_API_KEY
+// The URL/key may be overridden, but local mode always uses the shared Qwen
+// 3.8 model so the RTX 3090 never hosts two large LLMs at once.
 const DEFAULT_LM_STUDIO_URL = 'http://localhost:1234';
 const DEFAULT_LM_STUDIO_MODEL = 'qwen3.8-27b-uncensored-aggressive';
 
@@ -86,7 +87,7 @@ function getLmStudioUrl() {
 }
 
 function getLmStudioModel() {
-  return process.env.LM_STUDIO_MODEL || DEFAULT_LM_STUDIO_MODEL;
+  return DEFAULT_LM_STUDIO_MODEL;
 }
 
 // LM Studio does not require authentication; key is optional

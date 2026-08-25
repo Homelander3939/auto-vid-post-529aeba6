@@ -141,11 +141,11 @@ test('grounded page view ranks relevant controls and gives them short stable ref
 });
 
 test('small-model observation budget expands only after real difficulty', () => {
-  const easy = browserObservationBudget('Find the exact contact link.', [], { contextLength: 10240, vision: true });
+  const easy = browserObservationBudget('Find the exact contact link.', [], { contextLength: 16384, vision: true });
   assert.equal(easy.tier, 'focused');
   assert.ok(easy.maxElements <= 24);
 
-  const complex = browserObservationBudget('Compare these two plans and download the best report.', [], { contextLength: 10240 });
+  const complex = browserObservationBudget('Compare these two plans and download the best report.', [], { contextLength: 16384 });
   assert.equal(complex.tier, 'balanced');
   assert.ok(complex.maxBodyChars > easy.maxBodyChars);
 
@@ -154,7 +154,7 @@ test('small-model observation budget expands only after real difficulty', () => 
     { action: 'observe', ok: false },
     { action: 'click', ok: false, stateChanged: false },
     { action: 'done', ok: false, completionRejected: true },
-  ], { contextLength: 10240 });
+  ], { contextLength: 16384 });
   assert.equal(recovery.tier, 'recovery');
   assert.ok(recovery.maxElements > complex.maxElements);
 

@@ -325,7 +325,7 @@ Metrics:
 
 - 12-scenario offline contract benchmark implemented and passing 12/12;
 - isolated live-model benchmark implemented and passing 3/3 against a temporary loopback site (exact link, public contact, and verified form completion);
-- Qwen 3.8 capability/context discovery records its 32,256-token loaded context without loading a second chat model;
+- Qwen 3.8 capability/context discovery records its shared 16,384-token context without loading a second chat model;
 - automatic observation sizing now expands only after stalls, rejected completions, or complex tasks and contracts again for focused work;
 - per-run planner calls, action attempts, stalled actions, rejected completions, and elapsed time are recorded for verified quality reporting;
 - machine-readable reports are written under `server/data/benchmarks`; a weekly aggregate can consume only verified benchmark and run records.

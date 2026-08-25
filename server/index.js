@@ -55,7 +55,7 @@ const {
   seedDefaultAgentMemories,
   seedDefaultAgentSkills,
 } = require('./agentSkills');
-const { ensureSingleLocalLLM, getSingleLocalLLMStatus } = require('./lm-studio-model-manager');
+const { DEFAULT_MODEL, DEFAULT_CONTEXT_LENGTH, ensureSingleLocalLLM, getSingleLocalLLMStatus } = require('./lm-studio-model-manager');
 const { handleAgentCommand } = require('./agentWorkspace');
 const {
   createLocalBrowserSession,
@@ -835,7 +835,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'ok',
     mode: 'local',
-    runtime_contract_version: 5,
+    runtime_contract_version: 6,
     database: DB_FILE,
     counts: Object.fromEntries([
       'platform_accounts', 'social_post_accounts', 'schedule_config', 'social_post_schedules',
@@ -1272,7 +1272,7 @@ async function resolveSelectedAIConfig(override = null) {
   if (provider === 'lmstudio') {
     const savedLm = override ? null : await refreshLMStudioConfigFromSettings(supabase);
     const baseUrl = normalizeLMStudioBaseUrl(shouldForceLocalLMStudio() ? (process.env.LM_STUDIO_URL || 'http://localhost:1234') : (override?.baseUrl || saved?.ai_base_url || savedLm?.url || process.env.LM_STUDIO_URL || 'http://localhost:1234'));
-    const model = String(override?.model || saved?.ai_model || savedLm?.model || process.env.LM_STUDIO_MODEL || '').trim();
+    const model = DEFAULT_MODEL;
     const apiKey = String(override?.apiKey || saved?.ai_api_key || savedLm?.apiKey || process.env.LM_STUDIO_API_KEY || 'lm-studio').trim();
     if (!model) throw new Error('No LM Studio model selected. Load a model in LM Studio or choose one in Settings.');
     if (/(?:^|[-_/])(?:embed|embedding)(?:[-_/]|$)/i.test(model)) {
@@ -1313,9 +1313,10 @@ async function localChatCompletion(messages, { tools, tool_choice, max_tokens = 
   let activeModel = config.model;
   if (config.provider === 'lmstudio') {
     const runtime = await ensureSingleLocalLLM({
-      preferredModel: config.model,
+      preferredModel: DEFAULT_MODEL,
       baseUrl: config.baseUrl,
       loadIfMissing: true,
+      contextLength: DEFAULT_CONTEXT_LENGTH,
     });
     activeModel = runtime.modelId;
   }
@@ -1599,11 +1600,11 @@ app.post('/api/ai/select-model', async (req, res) => {
   try {
     const { provider = 'lmstudio', model, baseUrl } = req.body || {};
     if (provider !== 'lmstudio') return res.json({ ok: true, provider, localModelChanged: false });
-    if (!String(model || '').trim()) return res.status(400).json({ ok: false, error: 'model is required' });
     const runtime = await ensureSingleLocalLLM({
-      preferredModel: model,
+      preferredModel: DEFAULT_MODEL,
       baseUrl: baseUrl || LM_STUDIO_URL,
       loadIfMissing: false,
+      contextLength: DEFAULT_CONTEXT_LENGTH,
     });
     res.json({
       ok: true,

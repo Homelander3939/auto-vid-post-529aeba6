@@ -368,6 +368,17 @@ function seedRecoveredAccounts(browserState) {
       created_from_recovery: true,
       recovery_defaults_version: 2,
     });
+  } else if (currentSettings.ai_provider !== 'lmstudio'
+    || currentSettings.ai_model !== 'qwen3.8-27b-uncensored-aggressive'
+    || currentSettings.ai_base_url !== 'http://127.0.0.1:1234') {
+    saveRow('app_settings', {
+      ...currentSettings,
+      ai_provider: 'lmstudio',
+      ai_base_url: 'http://127.0.0.1:1234',
+      ai_model: 'qwen3.8-27b-uncensored-aggressive',
+      local_model_contract_version: 1,
+      local_model_contract_updated_at: new Date().toISOString(),
+    });
   } else if (currentSettings.created_from_recovery && !currentSettings.recovery_defaults_version) {
     // The first local-recovery seed disabled cleanup. Migrate that seed once, then
     // respect any later choice the user makes in Settings.

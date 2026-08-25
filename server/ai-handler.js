@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
-const { ensureSingleLocalLLM } = require('./lm-studio-model-manager');
+const { DEFAULT_MODEL, DEFAULT_CONTEXT_LENGTH, ensureSingleLocalLLM } = require('./lm-studio-model-manager');
 const { getAgentSkill, normalizeAgentSkillRecord } = require('./agentSkills');
 const {
   buildEvidencePacket,
@@ -29,7 +29,7 @@ const {
 } = require('./visualMedia');
 
 let LM_STUDIO_URL = normalizeLMStudioUrl(process.env.LM_STUDIO_URL || 'http://localhost:1234');
-let LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL || 'qwen3.8-27b-uncensored-aggressive';
+let LM_STUDIO_MODEL = DEFAULT_MODEL;
 let LM_STUDIO_API_KEY = process.env.LM_STUDIO_API_KEY || 'lm-studio';
 const FORCE_LOCAL_LM_STUDIO = String(process.env.LM_STUDIO_FORCE_LOCAL || '').toLowerCase() === 'true';
 const TECHNEWSLIST_FALLBACK_PROJECT = process.env.TECHNEWSLIST_FALLBACK_PROJECT
@@ -118,7 +118,8 @@ async function discoverLMStudioAgentModels(baseUrl = LM_STUDIO_URL, apiKey = LM_
     if (inventoryResp.ok) {
       const inventory = await inventoryResp.json();
       return (Array.isArray(inventory?.models) ? inventory.models : [])
-        .filter((model) => String(model?.type || '').toLowerCase() === 'llm')
+        .filter((model) => String(model?.type || '').toLowerCase() === 'llm'
+          && String(model?.key || '').toLowerCase() === DEFAULT_MODEL.toLowerCase())
         .map((model) => ({
           id: String(model?.key || '').trim(),
           label: String(model?.display_name || model?.key || '').trim(),
@@ -142,7 +143,7 @@ async function discoverLMStudioAgentModels(baseUrl = LM_STUDIO_URL, apiKey = LM_
     const rows = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : [];
     return [...new Map(rows
       .map((model) => String(model?.id || model?.name || '').trim())
-      .filter((id) => id && !/(?:^|[-_/])(?:embed|embedding)(?:[-_/]|$)/i.test(id))
+      .filter((id) => id.toLowerCase() === DEFAULT_MODEL.toLowerCase())
       .map((id) => [id, { id, label: id, type: 'llm', vision: false, toolUse: false, loaded: false }])
     ).values()];
   } finally {
@@ -158,7 +159,7 @@ async function refreshLMStudioConfigFromSettings(supabase) {
   if (FORCE_LOCAL_LM_STUDIO) {
     LM_STUDIO_URL = normalizeLMStudioUrl(process.env.LM_STUDIO_URL || 'http://localhost:1234');
     LM_STUDIO_API_KEY = process.env.LM_STUDIO_API_KEY || LM_STUDIO_API_KEY || 'lm-studio';
-    if (process.env.LM_STUDIO_MODEL) LM_STUDIO_MODEL = process.env.LM_STUDIO_MODEL;
+    LM_STUDIO_MODEL = DEFAULT_MODEL;
     return { url: LM_STUDIO_URL, model: LM_STUDIO_MODEL, apiKey: LM_STUDIO_API_KEY };
   }
   try {
@@ -170,7 +171,7 @@ async function refreshLMStudioConfigFromSettings(supabase) {
     if (data?.ai_provider === 'lmstudio') {
       if (data.ai_base_url) LM_STUDIO_URL = normalizeLMStudioUrl(data.ai_base_url);
       if (data.ai_api_key) LM_STUDIO_API_KEY = data.ai_api_key;
-      if (data.ai_model) LM_STUDIO_MODEL = data.ai_model;
+      LM_STUDIO_MODEL = DEFAULT_MODEL;
     }
   } catch (e) {
     console.warn('[AI] Could not refresh LM Studio settings:', e.message);
@@ -194,10 +195,11 @@ async function getSelectedChatConfig(supabase) {
   if (provider === 'lmstudio') {
     const config = await refreshLMStudioConfigFromSettings(supabase);
     const runtime = await ensureSingleLocalLLM({
-      preferredModel: config.model,
+      preferredModel: DEFAULT_MODEL,
       baseUrl: config.url,
       loadIfMissing: true,
       preserveLoaded: process.env.LM_STUDIO_PRESERVE_LOADED_MODEL === '1',
+      contextLength: DEFAULT_CONTEXT_LENGTH,
     });
     LM_STUDIO_MODEL = runtime.modelId;
     return { provider, endpoint: openAICompatEndpoint(provider, config.url), model: runtime.modelId, apiKey: config.apiKey || 'lm-studio' };
@@ -228,19 +230,13 @@ async function selectedChatFetch(supabase, bodyObj) {
 async function testLMStudioConnection({ baseUrl, apiKey, model } = {}) {
   const url = normalizeLMStudioUrl(baseUrl || LM_STUDIO_URL);
   const key = apiKey || LM_STUDIO_API_KEY || 'lm-studio';
-  let selectedModel = String(model || '').trim();
-  if (/(?:^|[-_/])(?:embed|embedding)(?:[-_/]|$)/i.test(selectedModel)) {
-    throw new Error('Embedding models cannot be used for AI Chat or browser-agent decisions. Select an LLM model.');
-  }
-  if (!selectedModel) {
-    const models = await discoverLMStudioModels(url, key);
-    selectedModel = models[0]?.id || '';
-  }
+  let selectedModel = DEFAULT_MODEL;
   if (!selectedModel) throw new Error('No LM Studio LLM is installed');
   const runtime = await ensureSingleLocalLLM({
     preferredModel: selectedModel,
     baseUrl: url,
     loadIfMissing: true,
+    contextLength: DEFAULT_CONTEXT_LENGTH,
   });
   selectedModel = runtime.modelId;
   const started = Date.now();
@@ -273,8 +269,8 @@ async function testLMStudioConnection({ baseUrl, apiKey, model } = {}) {
 
 /**
  * Resilient fetch wrapper for LM Studio.
- * If the request fails (model changed/unloaded), it auto-discovers the currently
- * loaded model and retries once. This prevents breakage when switching models.
+ * If the request fails because the shared model was unloaded, the guarded
+ * discovery path retries the same Qwen 3.8 instance once.
  */
 async function lmFetch(endpoint, bodyObj, retried = false) {
   const url = `${LM_STUDIO_URL}${endpoint}`;

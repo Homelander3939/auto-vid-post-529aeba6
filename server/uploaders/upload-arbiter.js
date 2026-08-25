@@ -13,7 +13,6 @@ const path = require('path');
 const fetch = require('node-fetch');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
-const { listRows } = require('../localDatabase');
 const { ensureSingleLocalLLM } = require('../lm-studio-model-manager');
 const { extractPageContext, planNextAction, takeScreenshot } = require('./smart-agent');
 const { reportArbiterEvent } = require('./arbiter-reporter');
@@ -34,8 +33,7 @@ const EXACT_FINAL_ACTION = /^(post|post now|publish|publish now|share|share now|
 const SENSITIVE_ACTION = /(log\s*in|sign\s*in|password|verification code|security code|confirm identity|verify identity)/i;
 const LOCAL_LM_BASE_URL = 'http://127.0.0.1:1234';
 const DEFAULT_ARBITER_MODEL = 'qwen3.8-27b-uncensored-aggressive';
-const FALLBACK_ARBITER_MODEL = 'qwen/qwen3.6-35b-a3b';
-const ARBITER_MODEL_IDENTIFIER = 'uploader-arbiter-qwen';
+const ARBITER_MODEL_IDENTIFIER = 'uploader-local-agent';
 const ARBITER_PLAN_TIMEOUT_MS = 90000;
 let runtimeStartPromise = null;
 let runtimeUsers = 0;
@@ -110,30 +108,16 @@ function isAgentCompatibleModel(model) {
 }
 
 function readPreferredArbiterModel() {
-  const explicit = String(process.env.UPLOAD_ARBITER_MODEL || '').trim();
-  if (explicit) return explicit;
-  const settings = listRows('app_settings').find((row) => String(row.id) === '1') || {};
-  if (String(settings.ai_provider || '').toLowerCase() === 'lmstudio' && settings.ai_model) {
-    return String(settings.ai_model).trim();
-  }
   return DEFAULT_ARBITER_MODEL;
 }
 
-function selectArbiterModel(models, preferredModel = DEFAULT_ARBITER_MODEL) {
+function selectArbiterModel(models, _preferredModel = DEFAULT_ARBITER_MODEL) {
   const compatible = (models || []).filter(isAgentCompatibleModel);
   const matches = (model, id) => {
     const target = String(id || '').toLowerCase();
     return String(model?.key || '').toLowerCase() === target || String(model?.loadedId || '').toLowerCase() === target;
   };
-  const loaded = compatible.filter((model) => model.loaded);
-  return loaded.find((model) => matches(model, preferredModel))
-    || loaded.find((model) => matches(model, DEFAULT_ARBITER_MODEL))
-    || loaded[0]
-    || compatible.find((model) => matches(model, preferredModel))
-    || compatible.find((model) => matches(model, DEFAULT_ARBITER_MODEL))
-    || compatible.find((model) => matches(model, FALLBACK_ARBITER_MODEL))
-    || compatible[0]
-    || null;
+  return compatible.find((model) => matches(model, DEFAULT_ARBITER_MODEL)) || null;
 }
 
 async function getLocalModelInventory() {
@@ -163,6 +147,7 @@ async function startLocalArbiterRuntime() {
       preferredModel: readPreferredArbiterModel(),
       baseUrl: LOCAL_LM_BASE_URL,
       loadIfMissing: true,
+      contextLength: 16384,
     });
     console.log(`[UploadArbiter] Using the shared single-model runtime: ${runtime.modelId}`);
     return {

@@ -10,16 +10,14 @@ const {
   getSingleLocalLLMStatus,
 } = require('./lm-studio-model-manager');
 
-const DEFAULT_CONTEXT_LENGTH = 32256;
+const DEFAULT_CONTEXT_LENGTH = 16384;
 
 function localAISettings() {
   const row = listRows('app_settings').find((item) => String(item?.id) === '1') || {};
   const provider = String(row.ai_provider || 'lmstudio').trim().toLowerCase();
   return {
     provider,
-    model: provider === 'lmstudio' && String(row.ai_model || '').trim()
-      ? String(row.ai_model).trim()
-      : DEFAULT_MODEL,
+    model: DEFAULT_MODEL,
     baseUrl: provider === 'lmstudio' && String(row.ai_base_url || '').trim()
       ? String(row.ai_base_url).trim()
       : 'http://127.0.0.1:1234',
@@ -54,10 +52,10 @@ async function requireRealCompletion(baseUrl, modelId) {
 
 async function main() {
   const settings = localAISettings();
-  const contextLength = Math.max(8192, Number(process.env.UPLOADER_LM_CONTEXT || DEFAULT_CONTEXT_LENGTH));
+  const contextLength = DEFAULT_CONTEXT_LENGTH;
   const baseUrl = process.env.UPLOADER_LM_BASE_URL || settings.baseUrl;
   const runtime = await ensureSingleLocalLLM({
-    preferredModel: process.env.UPLOADER_LM_MODEL || settings.model,
+    preferredModel: DEFAULT_MODEL,
     baseUrl,
     contextLength,
     loadIfMissing: true,

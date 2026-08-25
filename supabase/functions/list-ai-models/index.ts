@@ -82,9 +82,7 @@ Deno.serve(async (req) => {
       // Always include a hint entry so the dropdown is never empty
       if (models.length === 0) {
         models = [
-          { id: 'google/gemma-3-27b', label: 'Gemma 3 27B (LM Studio)' },
-          { id: 'qwen/qwen3-32b', label: 'Qwen 3 32B (LM Studio)' },
-          { id: 'meta-llama/llama-3.3-70b', label: 'Llama 3.3 70B (LM Studio)' },
+          { id: 'qwen3.8-27b-uncensored-aggressive', label: 'Qwen 3.8 27B (LM Studio local)' },
         ];
       }
     } else {

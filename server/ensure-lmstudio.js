@@ -152,11 +152,11 @@ async function firstAvailableModel(lmsPath) {
 
 async function ensureModelLoaded(lmsPath) {
   try {
-    const preferredModel = String(process.env.LM_STUDIO_MODEL || DEFAULT_MODEL).trim();
     const runtime = await ensureSingleLocalLLM({
-      preferredModel,
+      preferredModel: DEFAULT_MODEL,
       baseUrl: BASE_URL,
       loadIfMissing: true,
+      contextLength: 16384,
     });
     console.log(`[LM Studio] The only active agent model is ${runtime.modelId} (${runtime.modelKey}).`);
     return true;

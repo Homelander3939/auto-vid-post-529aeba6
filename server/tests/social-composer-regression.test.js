@@ -233,16 +233,16 @@ test('Upload arbiter denies final submission actions but permits an explicit saf
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Got it', type: 'button' }, [], true), true);
 });
 
-test('Upload arbiter reuses a loaded compatible LLM and otherwise prefers Qwen 3.8', () => {
+test('Upload arbiter always selects Qwen 3.8 even when another LLM is loaded', () => {
   const inventory = [
     { key: 'text-embedding-nomic-embed-text-v1.5', type: 'embedding', loaded: false },
     { key: 'qwen3.8-27b-uncensored-aggressive', type: 'llm', vision: true, loaded: false },
-    { key: 'qwen/qwen3.6-35b-a3b', type: 'llm', vision: true, loaded: true, loadedId: 'qwen/qwen3.6-35b-a3b' },
+    { key: 'legacy/local-model', type: 'llm', vision: true, loaded: true, loadedId: 'legacy-local-model' },
   ];
 
   assert.equal(
     arbiter.selectArbiterModel(inventory, 'qwen3.8-27b-uncensored-aggressive').key,
-    'qwen/qwen3.6-35b-a3b',
+    'qwen3.8-27b-uncensored-aggressive',
   );
   assert.equal(
     arbiter.selectArbiterModel(inventory.map((model) => ({ ...model, loaded: false })), 'qwen3.8-27b-uncensored-aggressive').key,
@@ -253,13 +253,13 @@ test('Upload arbiter reuses a loaded compatible LLM and otherwise prefers Qwen 3
 
 test('LM Studio guard always ejects other LLMs before selecting Qwen 3.8', () => {
   const bothLoaded = [
-    { key: 'qwen3.8-27b-uncensored-aggressive', type: 'llm', vision: true, loadedInstances: [{ id: 'qwen38-live' }] },
-    { key: 'qwen/qwen3.6-35b-a3b', type: 'llm', vision: true, loadedInstances: [{ id: 'qwen36-live' }] },
+    { key: 'qwen3.8-27b-uncensored-aggressive', type: 'llm', vision: true, loadedInstances: [{ id: 'uploader-local-agent', contextLength: 16384 }] },
+    { key: 'legacy/local-model', type: 'llm', vision: true, loadedInstances: [{ id: 'legacy-live', contextLength: 8192 }] },
     { key: 'text-embedding-nomic-embed-text-v1.5', type: 'embedding', loadedInstances: [{ id: 'embedding-live' }] },
   ];
   const keepPreferred = modelManager.planSingleModelTransition(bothLoaded, 'qwen3.8-27b-uncensored-aggressive', true);
-  assert.equal(keepPreferred.keep.id, 'qwen38-live');
-  assert.deepEqual(keepPreferred.unload.map((item) => item.id), ['qwen36-live']);
+  assert.equal(keepPreferred.keep.id, 'uploader-local-agent');
+  assert.deepEqual(keepPreferred.unload.map((item) => item.id), ['legacy-live']);
   assert.equal(keepPreferred.loadModel, null);
 
   const switchToPreferred = modelManager.planSingleModelTransition([
@@ -268,29 +268,29 @@ test('LM Studio guard always ejects other LLMs before selecting Qwen 3.8', () =>
     bothLoaded[2],
   ], 'qwen3.8-27b-uncensored-aggressive', true);
   assert.equal(switchToPreferred.keep, null);
-  assert.deepEqual(switchToPreferred.unload.map((item) => item.id), ['qwen36-live']);
+  assert.deepEqual(switchToPreferred.unload.map((item) => item.id), ['legacy-live']);
   assert.equal(switchToPreferred.loadModel, 'qwen3.8-27b-uncensored-aggressive');
 
-  const reloadForLargerContext = modelManager.planSingleModelTransition([
-    { ...bothLoaded[0], loadedInstances: [{ id: 'qwen38-live', contextLength: 8192 }] },
+  const reloadForExactContext = modelManager.planSingleModelTransition([
+    { ...bothLoaded[0], loadedInstances: [{ id: 'uploader-local-agent', contextLength: 32256 }] },
     bothLoaded[2],
-  ], 'qwen3.8-27b-uncensored-aggressive', true, 10240);
-  assert.equal(reloadForLargerContext.keep, null);
-  assert.deepEqual(reloadForLargerContext.unload.map((item) => item.id), ['qwen38-live']);
-  assert.equal(reloadForLargerContext.loadModel, 'qwen3.8-27b-uncensored-aggressive');
+  ], 'qwen3.8-27b-uncensored-aggressive', true, 16384);
+  assert.equal(reloadForExactContext.keep, null);
+  assert.deepEqual(reloadForExactContext.unload.map((item) => item.id), ['uploader-local-agent']);
+  assert.equal(reloadForExactContext.loadModel, 'qwen3.8-27b-uncensored-aggressive');
 });
 
 test('lightweight Telegram worker preserves exactly one factory-loaded model', () => {
   const inventory = [{
-    key: 'qwen/qwen3.6-35b-a3b',
+    key: 'qwen3.8-27b-uncensored-aggressive',
     type: 'llm',
     vision: true,
     toolUse: true,
-    loadedInstances: [{ id: 'factory-qwen', contextLength: 10240 }],
+    loadedInstances: [{ id: 'uploader-local-agent', contextLength: 16384 }],
   }];
   const preserved = modelManager.singleLoadedModel(inventory);
-  assert.equal(preserved.id, 'factory-qwen');
-  assert.equal(preserved.key, 'qwen/qwen3.6-35b-a3b');
+  assert.equal(preserved.id, 'uploader-local-agent');
+  assert.equal(preserved.key, 'qwen3.8-27b-uncensored-aggressive');
   assert.equal(modelManager.singleLoadedModel([...inventory, {
     key: 'another/model', type: 'llm', loadedInstances: [{ id: 'second-model' }],
   }]), null);
