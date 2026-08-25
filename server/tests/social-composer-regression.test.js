@@ -227,12 +227,33 @@ test('Instagram distinguishes verification and throttling from a generic login f
 test('Upload arbiter denies final submission actions but permits an explicit safe entry action', () => {
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Post', type: 'button' }, ['start a post']), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Publish now', type: 'button' }, []), false);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Next', tag: 'button', inDialog: true }, [], false, { modelProposed: true }), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Start a post', type: 'button' }, ['start a post']), true);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Log in', type: 'button' }, ['log in']), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Retry', type: 'button' }, [], true), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Got it', type: 'button' }, [], true), true);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Cancel', type: 'button' }, [], true), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Cancel', type: 'button' }, ['cancel'], true), true);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor(
+    { text: 'Continue with current settings', tag: 'button', inDialog: true },
+    [], true, { modelProposed: true },
+  ), true);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor(
+    { text: 'Cancel', tag: 'button', inDialog: true },
+    [], true, { modelProposed: true },
+  ), true);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor(
+    { text: 'Discard upload', tag: 'button', inDialog: true },
+    [], true, { modelProposed: true },
+  ), false);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor(
+    { text: 'Cancel', tag: 'button', inDialog: true, dialogHasDraftEditor: true },
+    [], true, { modelProposed: true },
+  ), false);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor(
+    { text: 'Cancel', tag: 'button', inDialog: true },
+    [], true, { modelProposed: true, deniedClickTexts: ['cancel'] },
+  ), false);
 });
 
 test('Upload arbiter always selects Qwen 3.8 even when another LLM is loaded', () => {
@@ -385,8 +406,91 @@ test('Upload arbiter rejects an unsafe AI click and safely clears an allowlisted
   assert.equal(await page.locator('#final').count(), 1);
   assert.equal(await page.locator('#blocker').count(), 0);
   assert.deepEqual(trace.map((item) => item.phase), ['received', 'answer', 'resolved']);
-  assert.equal(trace[1].details.executed, false);
-  assert.equal(trace[1].details.denialReason, 'AI click was outside the checkpoint allowlist.');
+  assert.equal(trace[1].details.executed, true);
+  assert.equal(trace[1].details.executionMode, 'known-safe fallback click');
+  assert.match(trace[1].details.denialReason, /final submission/i);
   assert.equal(trace[2].details.action, 'safe fallback click');
+  await page.close();
+});
+
+test('Upload arbiter uses scenario-grounded dialog actions without a label release', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <div id="first" role="dialog">
+      <p>A new optional workflow is available.</p>
+      <button id="keep-current">Keep current configuration</button>
+    </div>
+    <script>
+      document.querySelector('#keep-current').addEventListener('click', () => {
+        document.querySelector('#first').remove();
+        const second = document.createElement('div');
+        second.id = 'second';
+        second.setAttribute('role', 'dialog');
+        second.innerHTML = '<p>Continue without changing preferences?</p><button id="continue-current">Proceed unchanged</button>';
+        document.body.appendChild(second);
+        document.querySelector('#continue-current').addEventListener('click', () => {
+          second.remove();
+          document.body.dataset.ready = 'true';
+        });
+      });
+    </script>
+  `);
+
+  const proposed = [];
+  const result = await attemptUploadArbiter(page, {
+    platform: 'test',
+    checkpoint: 'unknown nested dialogs',
+    originalError: 'new modal sequence',
+    modelId: 'qwen-test-vision',
+    useVision: true,
+    saveArtifacts: false,
+    planner: async (_page, _goal, history) => {
+      proposed.push(history);
+      return history.length === 0
+        ? { action: 'click', selector: '#keep-current', reason: 'Keep the existing configuration and clear the first optional dialog.' }
+        : { action: 'click', selector: '#continue-current', reason: 'Proceed unchanged and close the remaining optional dialog.' };
+    },
+    verify: () => page.evaluate(() => document.body.dataset.ready === 'true'),
+  });
+
+  assert.equal(result.recovered, true);
+  assert.equal(proposed.length, 2);
+  assert.equal(proposed[1][0].action, 'click');
+  assert.equal(proposed[1][0].stateChanged, true);
+  assert.equal(await page.locator('[role="dialog"]').count(), 0);
+  await page.close();
+});
+
+test('Upload arbiter can clear a novel blocker and return control without performing final submission', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <button id="final">Post</button>
+    <div id="blocker" role="dialog">
+      <p>Enable an optional check?</p>
+      <button id="unchanged">Continue unchanged</button>
+    </div>
+    <script>
+      document.querySelector('#unchanged').addEventListener('click', () => document.querySelector('#blocker').remove());
+    </script>
+  `);
+
+  const result = await attemptUploadArbiter(page, {
+    platform: 'TikTok fixture',
+    checkpoint: 'publish action blocked',
+    originalError: 'dialog intercepted final action',
+    submissionAttempted: true,
+    progressMeansRecovered: true,
+    modelId: 'qwen-test-vision',
+    useVision: true,
+    saveArtifacts: false,
+    planner: async () => ({ action: 'click', selector: '#unchanged', reason: 'Close the optional dialog without changing settings.' }),
+    verify: async () => false,
+  });
+
+  assert.equal(result.recovered, true);
+  assert.equal(result.obstacleCleared, true);
+  assert.equal(result.checkpointReady, false);
+  assert.equal(await page.locator('#final').count(), 1);
+  assert.equal(await page.locator('#blocker').count(), 0);
   await page.close();
 });

@@ -29,8 +29,10 @@ const POST_SUBMIT_SAFE_LABELS = [
   'not now', 'not right now', 'got it', 'maybe later',
   'accept cookies', 'allow all cookies', 'decline optional cookies',
 ];
-const EXACT_FINAL_ACTION = /^(post|post now|publish|publish now|share|share now|tweet|submit|send|schedule|schedule post)$/i;
+const EXACT_FINAL_ACTION = /^(post|post now|publish|publish now|share|share now|tweet|submit|send|schedule|schedule post|next|done)$/i;
 const SENSITIVE_ACTION = /(log\s*in|sign\s*in|password|verification code|security code|confirm identity|verify identity)/i;
+const DESTRUCTIVE_ACTION = /(delete|discard|remove|erase|cancel\s+(?:the\s+)?upload|abort\s+(?:the\s+)?upload|abandon|sign\s*out|log\s*out|disconnect|revoke)/i;
+const PURCHASE_OR_ACCOUNT_ACTION = /(buy|purchase|pay|checkout|subscribe|boost|promote|advertise|authorize account|grant access)/i;
 const LOCAL_LM_BASE_URL = 'http://127.0.0.1:1234';
 const DEFAULT_ARBITER_MODEL = 'qwen3.8-27b-uncensored-aggressive';
 const ARBITER_MODEL_IDENTIFIER = 'uploader-local-agent';
@@ -183,15 +185,21 @@ async function releaseLocalArbiterRuntime() {
   runtimeStartPromise = null;
 }
 
-function matchesAllowedLabel(label, allowedClickTexts = []) {
-  const normalized = normalizeLabel(label);
-  return [...GENERIC_SAFE_LABELS, ...allowedClickTexts]
+function matchesDeniedLabel(label, deniedClickTexts = []) {
+  return deniedClickTexts
     .map(normalizeLabel)
     .filter(Boolean)
-    .some((allowed) => normalized === allowed || normalized.includes(allowed));
+    .some((denied) => label === denied || label.includes(denied));
 }
 
-function isSafeArbiterClickDescriptor(descriptor = {}, allowedClickTexts = [], submissionAttempted = false) {
+function assessArbiterClickDescriptor(descriptor = {}, options = {}) {
+  const {
+    allowedClickTexts = [],
+    deniedClickTexts = [],
+    submissionAttempted = false,
+    modelProposed = false,
+    allowContextualDialogActions = true,
+  } = options;
   const label = normalizeLabel([
     descriptor.text,
     descriptor.ariaLabel,
@@ -200,35 +208,87 @@ function isSafeArbiterClickDescriptor(descriptor = {}, allowedClickTexts = [], s
   ].filter(Boolean).join(' '));
   const type = normalizeLabel(descriptor.type);
 
-  if (!label || descriptor.disabled || descriptor.ariaDisabled === 'true') return false;
-  if (type === 'submit' || SENSITIVE_ACTION.test(label) || EXACT_FINAL_ACTION.test(label)) return false;
-  if (submissionAttempted) {
-    return [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
-      .map(normalizeLabel)
-      .some((allowed) => label === allowed || label.includes(allowed));
+  if (!label) return { safe: false, reason: 'The proposed control has no accessible label.' };
+  if (descriptor.disabled || descriptor.ariaDisabled === 'true') return { safe: false, reason: 'The proposed control is disabled.' };
+  if (descriptor.href) return { safe: false, reason: 'Navigation links are outside the upload-arbiter scope.' };
+  if (type === 'submit' || SENSITIVE_ACTION.test(label) || EXACT_FINAL_ACTION.test(label)) {
+    return { safe: false, reason: 'Final submission and account-security actions stay owned by deterministic uploader code.' };
   }
-  return matchesAllowedLabel(label, allowedClickTexts);
+  if (DESTRUCTIVE_ACTION.test(label) || PURCHASE_OR_ACCOUNT_ACTION.test(label) || matchesDeniedLabel(label, deniedClickTexts)) {
+    return { safe: false, reason: 'The proposed click is destructive, commercial, account-changing, or explicitly denied at this checkpoint.' };
+  }
+
+  const knownSafe = (submissionAttempted
+    ? [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
+    : [...GENERIC_SAFE_LABELS, ...allowedClickTexts])
+      .map(normalizeLabel)
+      .filter(Boolean)
+      .some((allowed) => label === allowed || label.includes(allowed));
+  if (knownSafe) return { safe: true, reason: 'The control matches a known-safe or caller-approved action.' };
+
+  // Scenario-driven recovery: a vision-grounded model may choose a previously
+  // unseen, reversible button inside the currently visible modal. Hard guards
+  // above still prevent final submission, navigation, credentials, deletion,
+  // account changes, and purchases. This avoids requiring a code release every
+  // time a platform changes "Not now" to a new label.
+  const interactiveRole = normalizeLabel(descriptor.role || descriptor.tag);
+  if (modelProposed && allowContextualDialogActions && descriptor.inDialog
+      && descriptor.dialogHasDraftEditor !== true
+      && (!Number.isFinite(Number(descriptor.dialogButtonCount)) || Number(descriptor.dialogButtonCount) <= 12)
+      && ['button', 'menuitem'].some((role) => interactiveRole.includes(role))) {
+    return { safe: true, reason: 'The model selected a reversible control inside the active blocking dialog.' };
+  }
+
+  return { safe: false, reason: 'The proposed click is outside the checkpoint policy.' };
+}
+
+function isSafeArbiterClickDescriptor(descriptor = {}, allowedClickTexts = [], submissionAttempted = false, options = {}) {
+  return assessArbiterClickDescriptor(descriptor, {
+    ...options,
+    allowedClickTexts,
+    submissionAttempted,
+  }).safe;
 }
 
 async function elementDescriptor(locator) {
-  return locator.evaluate((element) => ({
-    text: (element.innerText || element.textContent || '').slice(0, 180),
-    ariaLabel: element.getAttribute('aria-label') || '',
-    title: element.getAttribute('title') || '',
-    value: element.getAttribute('value') || '',
-    type: element.getAttribute('type') || '',
-    disabled: Boolean(element.disabled),
-    ariaDisabled: element.getAttribute('aria-disabled') || '',
-  })).catch(() => null);
+  return locator.evaluate((element) => {
+    const dialog = element.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+    return {
+      tag: String(element.tagName || '').toLowerCase(),
+      role: element.getAttribute('role') || '',
+      text: (element.innerText || element.textContent || '').slice(0, 180),
+      ariaLabel: element.getAttribute('aria-label') || '',
+      title: element.getAttribute('title') || '',
+      value: element.getAttribute('value') || '',
+      type: element.getAttribute('type') || '',
+      href: element.getAttribute('href') || '',
+      disabled: Boolean(element.disabled),
+      ariaDisabled: element.getAttribute('aria-disabled') || '',
+      inDialog: Boolean(dialog),
+      dialogText: (dialog?.innerText || '').slice(0, 600),
+      dialogButtonCount: dialog?.querySelectorAll('button, [role="button"], [role="menuitem"]').length || 0,
+      dialogHasDraftEditor: Boolean(dialog?.querySelector('textarea, [contenteditable="true"], [contenteditable=""], input[type="file"]')),
+    };
+  }).catch(() => null);
 }
 
 async function pageFingerprint(page) {
-  return page.evaluate(() => ({
-    url: window.location.href,
-    dialogs: document.querySelectorAll('[role="dialog"]:not([aria-hidden="true"])').length,
-    files: document.querySelectorAll('input[type="file"]').length,
-    text: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500),
-  })).catch(() => ({ url: page.url(), dialogs: 0, files: 0, text: '' }));
+  return page.evaluate(() => {
+    const visibleDialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]'))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+          && style.visibility !== 'hidden' && element.getAttribute('aria-hidden') !== 'true';
+      });
+    return {
+      url: window.location.href,
+      dialogs: visibleDialogs.length,
+      dialogText: visibleDialogs.map((element) => (element.innerText || element.textContent || '').replace(/\s+/g, ' ').slice(0, 260)).join(' | '),
+      files: document.querySelectorAll('input[type="file"]').length,
+      text: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500),
+    };
+  }).catch(() => ({ url: page.url(), dialogs: 0, dialogText: '', files: 0, text: '' }));
 }
 
 function safeSlug(value) {
@@ -291,13 +351,13 @@ async function withTimeout(promise, timeoutMs, fallback) {
   }
 }
 
-async function clickSafeFallback(page, allowedClickTexts, submissionAttempted) {
+async function clickSafeFallback(page, allowedClickTexts, deniedClickTexts, submissionAttempted) {
   const candidates = page.locator('button:visible, [role="button"]:visible, [role="menuitem"]:visible, a:visible');
   const count = Math.min(await candidates.count().catch(() => 0), 80);
   for (let index = 0; index < count; index++) {
     const locator = candidates.nth(index);
     const descriptor = await elementDescriptor(locator);
-    if (!isSafeArbiterClickDescriptor(descriptor, allowedClickTexts, submissionAttempted)) continue;
+    if (!isSafeArbiterClickDescriptor(descriptor, allowedClickTexts, submissionAttempted, { deniedClickTexts })) continue;
     if (await locator.click({ timeout: 5000 }).then(() => true).catch(() => false)) {
       return { clicked: true, descriptor };
     }
@@ -311,8 +371,10 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
     checkpoint = 'unknown',
     originalError = 'Uploader checkpoint stalled.',
     allowedClickTexts = [],
+    deniedClickTexts = [],
     submissionAttempted = false,
-    maxSteps = 2,
+    maxSteps = 4,
+    progressMeansRecovered = false,
     verify,
     planner = planNextAction,
     reporter = null,
@@ -330,14 +392,17 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
     : { record: {}, recordPath: '', screenshotPath: '' };
   const decisions = [];
   const before = await pageFingerprint(page);
-  const allowedSummary = (submissionAttempted
+  const knownSafeSummary = (submissionAttempted
     ? [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
     : [...GENERIC_SAFE_LABELS, ...allowedClickTexts]).join(', ');
+  const deniedSummary = deniedClickTexts.length ? deniedClickTexts.join(', ') : '(checkpoint hard guards only)';
   const goal = [
     `Diagnose and clear a non-submission obstacle for ${platform} at checkpoint "${checkpoint}".`,
-    `The normal uploader will continue afterward. Allowed click labels only: ${allowedSummary}.`,
+    'The normal uploader will continue afterward and owns all final Post/Publish/Share actions.',
+    `Known-safe labels: ${knownSafeSummary}. Explicitly denied labels: ${deniedSummary}.`,
+    'You may choose a different visible button only when it is inside the active blocking dialog and is a reversible way to dismiss, defer, retry, or accept a non-account optional setting.',
     'Never click Post, Publish, Share, Tweet, Submit, Send, Schedule, Next, Done, or a file picker.',
-    'Never fill credentials or verification codes and never navigate away.',
+    'Never delete/discard content, cancel an upload, buy/subscribe/promote, change an account, fill credentials or verification codes, or navigate away.',
     `Original uploader error: ${redactDiagnosticText(originalError)}`,
   ].join(' ');
 
@@ -358,15 +423,23 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
   console.log(`[UploadArbiter] ${platform}/${checkpoint}: local AI inspection started. Artifact: ${artifact.recordPath}`);
   await emitTrace('received', { problem: redactDiagnosticText(originalError) });
 
-  for (let step = 1; step <= Math.max(1, Math.min(maxSteps, 2)); step++) {
+  for (let step = 1; step <= Math.max(1, Math.min(maxSteps, 4)); step++) {
     if (typeof verify === 'function' && await verify().catch(() => false)) {
       saveArbiterResult(artifact, 'already-recovered', decisions);
       await emitTrace('resolved', { result: 'The checkpoint recovered before any arbiter action was necessary.' });
       return { recovered: true, reason: 'Checkpoint became ready before arbiter action.', artifactPath: artifact.recordPath };
     }
 
+    const plannerHistory = decisions.map((item) => ({
+      action: item.proposed?.action || 'observe',
+      selector: item.proposed?.selector || '',
+      ok: item.executed,
+      stateChanged: item.stateChanged,
+      reason: item.denialReason || item.proposed?.reason || '',
+    }));
+    const stepBefore = await pageFingerprint(page);
     const action = await withTimeout(
-      planner(page, goal, decisions, { useVision, model: modelId, baseUrl: LOCAL_LM_BASE_URL, nativeApi: true }),
+      planner(page, goal, plannerHistory, { useVision, model: modelId, baseUrl: LOCAL_LM_BASE_URL, nativeApi: true }),
       ARBITER_PLAN_TIMEOUT_MS,
       { action: 'failed', reason: 'Local AI arbiter timed out.', goalReached: false },
     );
@@ -376,11 +449,18 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
       const locator = page.locator(action.selector).first();
       const descriptor = await elementDescriptor(locator);
       decision.descriptor = descriptor;
-      if (isSafeArbiterClickDescriptor(descriptor, allowedClickTexts, submissionAttempted)) {
+      const assessment = assessArbiterClickDescriptor(descriptor || {}, {
+        allowedClickTexts,
+        deniedClickTexts,
+        submissionAttempted,
+        modelProposed: true,
+      });
+      decision.policy = assessment;
+      if (assessment.safe) {
         decision.proposedExecuted = await locator.click({ timeout: 5000 }).then(() => true).catch(() => false);
         decision.executed = decision.proposedExecuted;
       } else {
-        decision.denialReason = 'AI click was outside the checkpoint allowlist.';
+        decision.denialReason = assessment.reason;
       }
     } else if (action?.action === 'wait') {
       await page.waitForTimeout(Math.max(500, Math.min(Number(action.ms) || 1500, 5000)));
@@ -401,13 +481,18 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
     // If the model could not name a safe selector, use the same allowlist
     // deterministically against visible controls. The AI diagnosis still ran.
     if (!decision.executed) {
-      const fallback = await clickSafeFallback(page, allowedClickTexts, submissionAttempted);
+      const fallback = await clickSafeFallback(page, allowedClickTexts, deniedClickTexts, submissionAttempted);
       if (fallback.clicked) {
         decision.fallback = fallback.descriptor;
         decision.executed = true;
       }
     }
 
+    await page.waitForTimeout(900).catch(() => {});
+    const stepAfter = await pageFingerprint(page);
+    decision.stateChanged = JSON.stringify(stepBefore) !== JSON.stringify(stepAfter);
+    decision.dialogsBefore = stepBefore.dialogs;
+    decision.dialogsAfter = stepAfter.dialogs;
     decisions.push(decision);
     const proposedTarget = decision.descriptor
       ? [decision.descriptor.text, decision.descriptor.ariaLabel, decision.descriptor.title].filter(Boolean).join(' / ')
@@ -416,10 +501,11 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
       answer: action?.reason || 'The model returned no explanation.',
       action: action?.action || 'none',
       target: proposedTarget,
-      executed: decision.proposedExecuted,
+      executed: decision.executed,
+      executionMode: decision.proposedExecuted ? 'model-selected click' : decision.fallback ? 'known-safe fallback click' : 'not executed',
       denialReason: decision.denialReason,
     });
-    await page.waitForTimeout(1500).catch(() => {});
+    await page.waitForTimeout(600).catch(() => {});
     if (typeof verify === 'function' && await verify().catch(() => false)) {
       console.log(`[UploadArbiter] ${platform}/${checkpoint}: recovered safely at step ${step}.`);
       saveArbiterResult(artifact, 'recovered', decisions);
@@ -431,6 +517,24 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
         ...solvedAction,
       });
       return { recovered: true, reason: action?.reason || 'Safe arbiter action cleared the checkpoint.', artifactPath: artifact.recordPath };
+    }
+
+    if (progressMeansRecovered && decision.executed && decision.stateChanged
+        && stepBefore.dialogs > 0 && stepAfter.dialogs === 0) {
+      console.log(`[UploadArbiter] ${platform}/${checkpoint}: blocking dialog cleared; returning control to the deterministic uploader.`);
+      saveArbiterResult(artifact, 'obstacle-cleared', decisions);
+      await emitTrace('resolved', {
+        result: action?.reason || 'The blocking dialog was cleared and the normal uploader can resume.',
+        action: action?.action || 'safe action',
+        target: proposedTarget,
+      });
+      return {
+        recovered: true,
+        checkpointReady: false,
+        obstacleCleared: true,
+        reason: action?.reason || 'Blocking dialog cleared; normal uploader should resume.',
+        artifactPath: artifact.recordPath,
+      };
     }
   }
 
@@ -466,5 +570,5 @@ async function attemptUploadArbiter(page, options = {}) {
 
 module.exports = {
   attemptUploadArbiter,
-  __test: { isSafeArbiterClickDescriptor, isAgentCompatibleModel, redactDiagnosticText, selectArbiterModel },
+  __test: { assessArbiterClickDescriptor, isSafeArbiterClickDescriptor, isAgentCompatibleModel, redactDiagnosticText, selectArbiterModel },
 };

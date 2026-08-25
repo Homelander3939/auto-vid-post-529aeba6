@@ -1292,7 +1292,7 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
     let postClicked = false;
     let publishTriggered = false;
 
-    for (let clickAttempt = 0; clickAttempt < 3 && !publishTriggered; clickAttempt++) {
+    for (let clickAttempt = 0; clickAttempt < 4 && !publishTriggered; clickAttempt++) {
       await dismissExitDialog(page);
       const preClickBtn = await capturePostButtonState();
       postClicked = await clickPostOnce();
@@ -1333,6 +1333,26 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         console.warn(`[TikTok] Post click attempt ${clickAttempt + 1} did not trigger publish flow; retrying`);
         if (clickAttempt >= 1) {
           await dismissOverlayBlockingFlow(page, { logPrefix: '[TikTok]' });
+        }
+
+        const visibleBlockingDialogs = await page.locator(
+          '[role="dialog"]:visible, [role="alertdialog"]:visible, [aria-modal="true"]:visible'
+        ).count().catch(() => 0);
+        if (visibleBlockingDialogs > 0) {
+          const arbiter = await attemptUploadArbiter(page, {
+            platform: 'TikTok video',
+            checkpoint: 'publish action blocked',
+            originalError: `Post click attempt ${clickAttempt + 1} left ${visibleBlockingDialogs} blocking dialog(s) and did not start publishing.`,
+            submissionAttempted: true,
+            progressMeansRecovered: true,
+            verify: async () => hasPublishStarted(preClickBtn),
+          });
+          if (arbiter.recovered) {
+            publishTriggered = await hasPublishStarted(preClickBtn);
+            if (!publishTriggered) {
+              console.log('[TikTok] AI cleared the blocking scenario; deterministic uploader will retry the final Post action.');
+            }
+          }
         }
       }
     }
@@ -1383,19 +1403,51 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
       }
     }
 
-    // If still no URL, try navigating to the profile to get the latest video URL
-    if (!videoUrl) {
+    if (!completion.success) {
+      const arbiter = await attemptUploadArbiter(page, {
+        platform: 'TikTok video',
+        checkpoint: 'post-submit confirmation',
+        originalError: completion.reason,
+        submissionAttempted: true,
+        progressMeansRecovered: true,
+        verify: async () => (await assessTikTokCompletion(page)).success,
+      });
+      if (arbiter.recovered) {
+        completion = await assessTikTokCompletion(page);
+        videoUrl = videoUrl || await extractTikTokVideoUrl(page);
+
+        // The vision arbiter clears only the unexpected obstacle. The normal
+        // uploader still owns the authorized final Post action and duplicate
+        // checks, so it safely resumes here if publication never started.
+        if (!completion.success && page.url().includes('/tiktokstudio/upload')) {
+          const preResumeButton = await capturePostButtonState();
+          const resumedClick = await clickPostOnce();
+          if (resumedClick) {
+            await page.waitForTimeout(1000);
+            await acceptContinueToPostDialog(page);
+            for (let poll = 0; poll < 5 && !publishTriggered; poll++) {
+              await page.waitForTimeout(2000);
+              publishTriggered = await hasPublishStarted(preResumeButton);
+            }
+            if (publishTriggered) await waitForPublishConfirmation(page, 240);
+            completion = await assessTikTokCompletion(page);
+            videoUrl = videoUrl || await extractTikTokVideoUrl(page);
+          }
+        }
+      }
+    }
+
+    // Resolve the permalink only after obstacle recovery. Navigating away while
+    // a dialog is present destroys the visual context the arbiter needs.
+    if (!videoUrl && (completion.success || publishTriggered)) {
       try {
-        // Navigate to TikTok profile/manage page to find the published video
         await page.goto('https://www.tiktok.com/tiktokstudio/content', { waitUntil: 'domcontentloaded', timeout: 15000 });
         await page.waitForTimeout(3000);
         videoUrl = await page.evaluate(() => {
           const links = Array.from(document.querySelectorAll('a[href*="/video/"]'));
           for (const link of links) {
             const href = link.getAttribute('href') || '';
-            if (href.includes('/video/')) {
-              return href.startsWith('http') ? href : `https://www.tiktok.com${href}`;
-            }
+            if (href.includes('/video/')) return href.startsWith('http') ? href : `https://www.tiktok.com${href}`;
           }
           return '';
         }).catch(() => '');
@@ -1409,23 +1461,6 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
 
     if (completion.success && !videoUrl) {
       throw new Error('TikTok publish appears complete, but no real TikTok video URL was found. Post link verification failed.');
-    }
-
-    if (!completion.success) {
-      const arbiter = await attemptUploadArbiter(page, {
-        platform: 'TikTok video',
-        checkpoint: 'post-submit confirmation',
-        originalError: completion.reason,
-        submissionAttempted: true,
-        // TikTok's optional content-check prompt uses Cancel to decline the
-        // extra feature without cancelling or resubmitting the video.
-        allowedClickTexts: ['cancel'],
-        verify: async () => (await assessTikTokCompletion(page)).success,
-      });
-      if (arbiter.recovered) {
-        completion = await assessTikTokCompletion(page);
-        videoUrl = videoUrl || await extractTikTokVideoUrl(page);
-      }
     }
 
     if (!completion.success && completion.needsHuman) {

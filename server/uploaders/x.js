@@ -736,6 +736,7 @@ async function uploadToX(imagePath, { description, hashtags = [] }, opts = {}) {
         originalError: composerError.message,
         // Do not allow Close/Cancel here: X uses those controls to discard a draft.
         allowedClickTexts: ['retry', 'try again', 'reload'],
+        deniedClickTexts: ['close', 'cancel'],
         verify: async () => {
           const candidate = await getActiveXComposerTextArea(page);
           return candidate.isVisible().catch(() => false);
