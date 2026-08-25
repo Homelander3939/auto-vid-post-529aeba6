@@ -1417,6 +1417,9 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         checkpoint: 'post-submit confirmation',
         originalError: completion.reason,
         submissionAttempted: true,
+        // TikTok's optional content-check prompt uses Cancel to decline the
+        // extra feature without cancelling or resubmitting the video.
+        allowedClickTexts: ['cancel'],
         verify: async () => (await assessTikTokCompletion(page)).success,
       });
       if (arbiter.recovered) {

@@ -21,12 +21,15 @@ const navItems = [
 ];
 
 type ServerStatus = 'connected' | 'disconnected' | 'checking';
+type OptionalAIStatus = 'ready' | 'standby' | 'offline' | 'degraded' | 'checking';
 
 function useLocalServerStatus() {
   const isLocalhost = typeof window !== 'undefined' && (
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   );
   const [status, setStatus] = useState<ServerStatus>(isLocalhost ? 'checking' : 'disconnected');
+  const [aiStatus, setAIStatus] = useState<OptionalAIStatus>('checking');
+  const [aiMessage, setAIMessage] = useState('Checking the optional local AI arbiter.');
 
   useEffect(() => {
     // Skip health checks when running in the cloud preview — localhost:3001 is unreachable
@@ -36,9 +39,18 @@ function useLocalServerStatus() {
     const check = async () => {
       try {
         const resp = await fetch('http://localhost:3001/api/health', { signal: AbortSignal.timeout(3000) });
-        if (mounted) setStatus(resp.ok ? 'connected' : 'disconnected');
+        const health = resp.ok ? await resp.json().catch(() => null) : null;
+        if (mounted) {
+          setStatus(resp.ok && health?.core?.status !== 'down' ? 'connected' : 'disconnected');
+          setAIStatus((health?.ai?.status || 'offline') as OptionalAIStatus);
+          setAIMessage(health?.ai?.message || 'AI is optional and will load only when requested.');
+        }
       } catch {
-        if (mounted) setStatus('disconnected');
+        if (mounted) {
+          setStatus('disconnected');
+          setAIStatus('offline');
+          setAIMessage('The core local server is offline.');
+        }
       }
     };
     check();
@@ -46,7 +58,7 @@ function useLocalServerStatus() {
     return () => { mounted = false; clearInterval(interval); };
   }, [isLocalhost]);
 
-  return status;
+  return { serverStatus: status, aiStatus, aiMessage };
 }
 
 type DiagnosticsSnapshot = {
@@ -54,11 +66,11 @@ type DiagnosticsSnapshot = {
   issues: string[];
   gateway: { ok: boolean; latencyMs: number; error?: string };
   local_worker: { alive: boolean; last_seen_at: string | null };
-  providers: any;
+  providers: Record<string, { status: string; optional?: boolean }>;
   runs_24h: { total: number; completed: number; failed: number; running: number };
 };
 
-function useAgentDiagnostics(serverStatus: ServerStatus) {
+function useAgentDiagnostics(serverStatus: ServerStatus, aiStatus: OptionalAIStatus, aiMessage: string) {
   const [data, setData] = useState<DiagnosticsSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -69,21 +81,24 @@ function useAgentDiagnostics(serverStatus: ServerStatus) {
     );
     const localAlive = serverStatus === 'connected';
     const previewMode = !isLocalhost;
+    const aiReady = aiStatus === 'ready';
 
     setData({
-      overall: previewMode || localAlive ? 'healthy' : 'degraded',
+      overall: previewMode || aiReady ? 'healthy' : localAlive ? 'degraded' : 'down',
       issues: previewMode
         ? ['Live edge diagnostics disabled to prevent transient 503 cold-starts from blanking the app.']
-        : localAlive
-          ? ['Edge diagnostics disabled; local server health is checked directly from this browser.']
+        : localAlive && !aiReady
+          ? [aiMessage, 'Core uploads, schedules, accounts, and social workers remain operational without AI.']
+          : localAlive
+            ? ['Optional AI arbiter is ready. Core automation remains independent.']
           : ['Local server is not responding on localhost:3001.'],
-      gateway: { ok: true, latencyMs: 0 },
+      gateway: { ok: aiReady, latencyMs: 0, error: aiReady ? undefined : aiMessage },
       local_worker: { alive: localAlive, last_seen_at: localAlive ? new Date().toISOString() : null },
-      providers: {},
+      providers: { lmstudio: { status: aiStatus, optional: true } },
       runs_24h: { total: 0, completed: 0, failed: 0, running: 0 },
     });
     setLoading(false);
-  }, [serverStatus]);
+  }, [serverStatus, aiStatus, aiMessage]);
 
   useEffect(() => {
     refresh();
@@ -93,8 +108,8 @@ function useAgentDiagnostics(serverStatus: ServerStatus) {
 }
 
 export default function AppLayout() {
-  const serverStatus = useLocalServerStatus();
-  const { data: diagnostics, refresh: refreshDiagnostics } = useAgentDiagnostics(serverStatus);
+  const { serverStatus, aiStatus, aiMessage } = useLocalServerStatus();
+  const { data: diagnostics, refresh: refreshDiagnostics } = useAgentDiagnostics(serverStatus, aiStatus, aiMessage);
   const queryClient = useQueryClient();
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -270,18 +285,17 @@ export default function AppLayout() {
                 ) : diagnostics.overall === 'healthy' ? (
                   <>
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700 dark:text-emerald-400 font-medium">AI healthy</span>
+                    <span className="text-emerald-700 dark:text-emerald-400 font-medium">AI ready · optional</span>
                   </>
                 ) : diagnostics.overall === 'degraded' ? (
                   <>
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                    <span className="text-amber-700 dark:text-amber-400 font-medium">AI degraded</span>
-                    <span className="ml-auto text-[10px] text-muted-foreground">{diagnostics.issues.length}</span>
+                    <span className="text-amber-700 dark:text-amber-400 font-medium">AI standby · core ready</span>
                   </>
                 ) : (
                   <>
                     <AlertTriangle className="w-3.5 h-3.5 text-destructive" />
-                    <span className="text-destructive font-medium">AI down</span>
+                    <span className="text-destructive font-medium">Core server offline</span>
                     <span className="ml-auto text-[10px] text-muted-foreground">{diagnostics.issues.length}</span>
                   </>
                 )}

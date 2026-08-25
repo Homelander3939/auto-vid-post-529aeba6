@@ -55,7 +55,9 @@ const {
   seedDefaultAgentMemories,
   seedDefaultAgentSkills,
 } = require('./agentSkills');
-const { DEFAULT_MODEL, DEFAULT_CONTEXT_LENGTH, ensureSingleLocalLLM, getSingleLocalLLMStatus } = require('./lm-studio-model-manager');
+const { DEFAULT_MODEL, DEFAULT_CONTEXT_LENGTH, ensureSingleLocalLLM } = require('./lm-studio-model-manager');
+const { buildRuntimeHealth, probeOptionalLocalAI } = require('./runtime-health');
+const { recoverInterruptedJobRow, scheduledStatusAfterInterruption } = require('./interrupted-upload-recovery');
 const { handleAgentCommand } = require('./agentWorkspace');
 const {
   createLocalBrowserSession,
@@ -831,28 +833,21 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', async (req, res) => {
   const config = await refreshLMStudioConfigFromSettings(supabase).catch(() => ({ url: LM_STUDIO_URL, model: 'unknown' }));
-  const llmGuard = await getSingleLocalLLMStatus(config.url).catch((error) => ({ ok: false, loadedCount: -1, loaded: [], error: error.message }));
-  res.json({
-    status: 'ok',
-    mode: 'local',
-    runtime_contract_version: 6,
+  // Health must stay fast and truthful when LM Studio is intentionally stopped.
+  // The uploader, scheduler, social workers, and database do not depend on AI.
+  // Do not call the lifecycle manager here: a health probe must never load a
+  // model, wait for the CLI, or turn optional AI downtime into core downtime.
+  const aiProbe = await probeOptionalLocalAI(config.url, { timeoutMs: 900 });
+  res.json(buildRuntimeHealth({
+    runtimeContractVersion: 7,
     database: DB_FILE,
     counts: Object.fromEntries([
       'platform_accounts', 'social_post_accounts', 'schedule_config', 'social_post_schedules',
       'scheduled_uploads', 'upload_jobs', 'social_posts',
     ].map((table) => [table, listRows(table).length])),
-    ai: {
-      provider: 'lmstudio',
-      url: config.url,
-      model: config.model,
-      single_model_guard: {
-        ok: llmGuard.ok,
-        loaded_count: llmGuard.loadedCount,
-        loaded: (llmGuard.loaded || []).map((item) => ({ id: item.id, key: item.key })),
-        error: llmGuard.error || null,
-      },
-    },
-  });
+    aiConfig: config,
+    aiProbe,
+  }));
 });
 
 app.get('/api/local-storage/:bucket/*', (req, res) => {
@@ -3882,6 +3877,42 @@ function redactSensitiveValue(value) {
   return typeof value === 'string' ? redactSensitiveText(value) : value;
 }
 
+async function recoverInterruptedUploadState() {
+  // A restarted Node process cannot still own any browser upload represented by
+  // an `uploading`/`processing` database row. Convert those abandoned locks to
+  // explicit, retryable outcomes before the scheduler and queue pollers start.
+  const { data: interruptedJobs } = await supabase
+    .from('upload_jobs')
+    .select('*')
+    .eq('status', 'uploading');
+  const recoveredById = new Map();
+  for (const job of interruptedJobs || []) {
+    const recovered = recoverInterruptedJobRow(job);
+    if (!recovered) continue;
+    await supabase.from('upload_jobs').update(recovered).eq('id', job.id);
+    recoveredById.set(job.id, recovered.status);
+    console.warn(`[Recovery] Upload job ${job.id} was abandoned by an earlier worker and is now ${recovered.status}; source files were preserved.`);
+  }
+
+  const { data: interruptedSchedules } = await supabase
+    .from('scheduled_uploads')
+    .select('*')
+    .eq('status', 'processing');
+  for (const schedule of interruptedSchedules || []) {
+    let jobStatus = recoveredById.get(schedule.upload_job_id);
+    if (!jobStatus && schedule.upload_job_id) {
+      const { data: job } = await supabase.from('upload_jobs').select('status').eq('id', schedule.upload_job_id).maybeSingle();
+      jobStatus = job?.status;
+    }
+    const status = scheduledStatusAfterInterruption(jobStatus);
+    await supabase.from('scheduled_uploads').update({
+      status,
+      recovery_reason: 'interrupted_uploader_worker',
+    }).eq('id', schedule.id);
+    console.warn(`[Recovery] Scheduled upload ${schedule.id} no longer holds an abandoned processing lock (${status}).`);
+  }
+}
+
 async function redactCompletedTelegramInput(cmd) {
   const updateId = Number(cmd?.args?.update_id);
   if (!Number.isFinite(updateId)) return;
@@ -4365,8 +4396,11 @@ app.listen(PORT, () => {
   console.log(`   Local database: ${DB_FILE}`);
   console.log(`   AI: LM Studio at ${LM_STUDIO_URL}`);
   console.log(`   Mode: Local Playwright automation + Local AI\n`);
-  recoverInterruptedAgentRuns().catch((error) => console.warn('[LocalAgent] Startup recovery failed:', error.message));
   startLocalBackupSchedule();
   startLocalTelegramPoller({ supabase, getSettings });
-  setupCron();
+  (async () => {
+    await recoverInterruptedAgentRuns().catch((error) => console.warn('[LocalAgent] Startup recovery failed:', error.message));
+    await recoverInterruptedUploadState().catch((error) => console.warn('[Recovery] Upload startup recovery failed:', error.message));
+    setupCron();
+  })();
 });

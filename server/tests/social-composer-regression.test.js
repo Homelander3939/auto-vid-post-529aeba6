@@ -231,6 +231,8 @@ test('Upload arbiter denies final submission actions but permits an explicit saf
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Log in', type: 'button' }, ['log in']), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Retry', type: 'button' }, [], true), false);
   assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Got it', type: 'button' }, [], true), true);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Cancel', type: 'button' }, [], true), false);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Cancel', type: 'button' }, ['cancel'], true), true);
 });
 
 test('Upload arbiter always selects Qwen 3.8 even when another LLM is loaded', () => {

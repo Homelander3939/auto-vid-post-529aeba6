@@ -34,6 +34,7 @@ const SENSITIVE_ACTION = /(log\s*in|sign\s*in|password|verification code|securit
 const LOCAL_LM_BASE_URL = 'http://127.0.0.1:1234';
 const DEFAULT_ARBITER_MODEL = 'qwen3.8-27b-uncensored-aggressive';
 const ARBITER_MODEL_IDENTIFIER = 'uploader-local-agent';
+const ARBITER_START_TIMEOUT_MS = 45000;
 const ARBITER_PLAN_TIMEOUT_MS = 90000;
 let runtimeStartPromise = null;
 let runtimeUsers = 0;
@@ -143,12 +144,15 @@ async function waitForArbiterModel(modelKey, timeoutMs = 180000) {
 
 async function startLocalArbiterRuntime() {
   try {
-    const runtime = await ensureSingleLocalLLM({
+    const runtime = await withTimeout(ensureSingleLocalLLM({
       preferredModel: readPreferredArbiterModel(),
       baseUrl: LOCAL_LM_BASE_URL,
       loadIfMissing: true,
       contextLength: 16384,
-    });
+    }), ARBITER_START_TIMEOUT_MS, null);
+    if (!runtime) {
+      throw new Error('Optional local AI did not become ready within 45 seconds; continuing with deterministic DOM recovery.');
+    }
     console.log(`[UploadArbiter] Using the shared single-model runtime: ${runtime.modelId}`);
     return {
       ready: true,
@@ -199,7 +203,7 @@ function isSafeArbiterClickDescriptor(descriptor = {}, allowedClickTexts = [], s
   if (!label || descriptor.disabled || descriptor.ariaDisabled === 'true') return false;
   if (type === 'submit' || SENSITIVE_ACTION.test(label) || EXACT_FINAL_ACTION.test(label)) return false;
   if (submissionAttempted) {
-    return POST_SUBMIT_SAFE_LABELS
+    return [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
       .map(normalizeLabel)
       .some((allowed) => label === allowed || label.includes(allowed));
   }
@@ -327,7 +331,7 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
   const decisions = [];
   const before = await pageFingerprint(page);
   const allowedSummary = (submissionAttempted
-    ? POST_SUBMIT_SAFE_LABELS
+    ? [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
     : [...GENERIC_SAFE_LABELS, ...allowedClickTexts]).join(', ');
   const goal = [
     `Diagnose and clear a non-submission obstacle for ${platform} at checkpoint "${checkpoint}".`,
