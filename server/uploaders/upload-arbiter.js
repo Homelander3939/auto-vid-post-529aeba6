@@ -29,6 +29,8 @@ const POST_SUBMIT_SAFE_LABELS = [
   'not now', 'not right now', 'got it', 'maybe later',
   'accept cookies', 'allow all cookies', 'decline optional cookies',
 ];
+const TRANSIENT_ERROR_RECOVERY_LABELS = ['retry', 'try again', 'reload', 'refresh'];
+const TRANSIENT_ERROR_PAGE = /(something went wrong|please try again|temporary error|could(?:n['’]t| not) load|failed to load|network error|connection error)/i;
 const EXACT_FINAL_ACTION = /^(post|post now|publish|publish now|share|share now|tweet|submit|send|schedule|schedule post|next|done)$/i;
 const SENSITIVE_ACTION = /(log\s*in|sign\s*in|password|verification code|security code|confirm identity|verify identity)/i;
 const DESTRUCTIVE_ACTION = /(delete|discard|remove|erase|cancel\s+(?:the\s+)?upload|abort\s+(?:the\s+)?upload|abandon|sign\s*out|log\s*out|disconnect|revoke)/i;
@@ -242,6 +244,12 @@ function assessArbiterClickDescriptor(descriptor = {}, options = {}) {
   return { safe: false, reason: 'The proposed click is outside the checkpoint policy.' };
 }
 
+function transientRecoveryLabelsForBody(bodyText = '') {
+  return TRANSIENT_ERROR_PAGE.test(String(bodyText || ''))
+    ? [...TRANSIENT_ERROR_RECOVERY_LABELS]
+    : [];
+}
+
 function isSafeArbiterClickDescriptor(descriptor = {}, allowedClickTexts = [], submissionAttempted = false, options = {}) {
   return assessArbiterClickDescriptor(descriptor, {
     ...options,
@@ -392,9 +400,17 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
     : { record: {}, recordPath: '', screenshotPath: '' };
   const decisions = [];
   const before = await pageFingerprint(page);
+  // A platform-wide transient error screen is not a final submission control.
+  // Permit only its reversible Retry/Reload family after the page itself proves
+  // that it is in a recognized error state. All destructive, account, payment,
+  // navigation, and final Post/Publish guards below still apply unchanged.
+  const effectiveAllowedClickTexts = [
+    ...allowedClickTexts,
+    ...transientRecoveryLabelsForBody(before.text),
+  ];
   const knownSafeSummary = (submissionAttempted
-    ? [...POST_SUBMIT_SAFE_LABELS, ...allowedClickTexts]
-    : [...GENERIC_SAFE_LABELS, ...allowedClickTexts]).join(', ');
+    ? [...POST_SUBMIT_SAFE_LABELS, ...effectiveAllowedClickTexts]
+    : [...GENERIC_SAFE_LABELS, ...effectiveAllowedClickTexts]).join(', ');
   const deniedSummary = deniedClickTexts.length ? deniedClickTexts.join(', ') : '(checkpoint hard guards only)';
   const goal = [
     `Diagnose and clear a non-submission obstacle for ${platform} at checkpoint "${checkpoint}".`,
@@ -450,7 +466,7 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
       const descriptor = await elementDescriptor(locator);
       decision.descriptor = descriptor;
       const assessment = assessArbiterClickDescriptor(descriptor || {}, {
-        allowedClickTexts,
+        allowedClickTexts: effectiveAllowedClickTexts,
         deniedClickTexts,
         submissionAttempted,
         modelProposed: true,
@@ -481,7 +497,7 @@ async function attemptUploadArbiterWithRuntime(page, options = {}) {
     // If the model could not name a safe selector, use the same allowlist
     // deterministically against visible controls. The AI diagnosis still ran.
     if (!decision.executed) {
-      const fallback = await clickSafeFallback(page, allowedClickTexts, deniedClickTexts, submissionAttempted);
+      const fallback = await clickSafeFallback(page, effectiveAllowedClickTexts, deniedClickTexts, submissionAttempted);
       if (fallback.clicked) {
         decision.fallback = fallback.descriptor;
         decision.executed = true;
@@ -570,5 +586,5 @@ async function attemptUploadArbiter(page, options = {}) {
 
 module.exports = {
   attemptUploadArbiter,
-  __test: { assessArbiterClickDescriptor, isSafeArbiterClickDescriptor, isAgentCompatibleModel, redactDiagnosticText, selectArbiterModel },
+  __test: { assessArbiterClickDescriptor, isSafeArbiterClickDescriptor, isAgentCompatibleModel, redactDiagnosticText, selectArbiterModel, transientRecoveryLabelsForBody },
 };

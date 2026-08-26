@@ -213,6 +213,12 @@ test('TikTok recognizes an upload redirect to login as recoverable authenticatio
   assert.equal(tiktok.isTikTokAuthUrl('https://www.tiktok.com/tiktokstudio/upload'), false);
 });
 
+test('TikTok vision does not mistake an explicit no-progress statement for an active upload', () => {
+  assert.equal(tiktok.visionIndicatesRealUploadInProgress('Fully uploaded. No progress bar or percentage is shown.'), false);
+  assert.equal(tiktok.visionIndicatesRealUploadInProgress('The video is uploading and a progress bar is visible.'), true);
+  assert.equal(tiktok.visionIndicatesRealUploadInProgress('Copyright content check is still running.'), false);
+});
+
 test('Instagram distinguishes verification and throttling from a generic login failure', () => {
   assert.deepEqual(
     instagram.classifyInstagramAuthSnapshot({ url: 'https://www.instagram.com/challenge/123', text: '', hasCode: false }),
@@ -254,6 +260,14 @@ test('Upload arbiter denies final submission actions but permits an explicit saf
     { text: 'Cancel', tag: 'button', inDialog: true },
     [], true, { modelProposed: true, deniedClickTexts: ['cancel'] },
   ), false);
+});
+
+test('Upload arbiter recognizes reversible recovery controls only on transient error pages', () => {
+  const labels = arbiter.transientRecoveryLabelsForBody('Something went wrong. Please try again.');
+  assert.deepEqual(labels, ['retry', 'try again', 'reload', 'refresh']);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Retry', type: 'button' }, labels, true), true);
+  assert.deepEqual(arbiter.transientRecoveryLabelsForBody('Upload complete. Ready to post.'), []);
+  assert.equal(arbiter.isSafeArbiterClickDescriptor({ text: 'Post', type: 'button' }, labels, true), false);
 });
 
 test('Upload arbiter always selects Qwen 3.8 even when another LLM is loaded', () => {

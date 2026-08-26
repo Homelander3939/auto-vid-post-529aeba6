@@ -438,6 +438,19 @@ async function waitForVideoProcessing(page, maxWaitSeconds = 240) {
   return false;
 }
 
+function visionIndicatesRealUploadInProgress(description = '') {
+  const desc = String(description || '').toLowerCase();
+  const explicitlyComplete = /(fully uploaded|upload (?:is )?complete|upload section shows ['\"]?uploaded|no (?:upload )?(?:percentage|progress bar)|without (?:an? )?(?:upload )?(?:percentage|progress bar))/i.test(desc);
+  if (explicitlyComplete) return false;
+  const isCopyrightOrContentCheck = desc.includes('copyright')
+    || desc.includes('content check')
+    || desc.includes('music check');
+  return !isCopyrightOrContentCheck
+    && (desc.includes('uploading') || desc.includes('upload in progress')
+      || desc.includes('upload progress') || desc.includes('% uploaded')
+      || desc.includes('progress bar'));
+}
+
 async function waitForPublishConfirmation(page, maxWaitSeconds = 300) {
   // After clicking Post, wait for TikTok to confirm the video is published/queued.
   // This is critical — exiting too early triggers "Sure you want to cancel your upload?"
@@ -1124,11 +1137,7 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
         const isCopyrightOrContentCheck =
           desc.includes('copyright') || desc.includes('content check') || desc.includes('music check');
         // Only wait extra for genuine upload/file-transfer progress, not background checks
-        const isRealUploadInProgress =
-          !isCopyrightOrContentCheck &&
-          (desc.includes('uploading') || desc.includes('upload in progress') ||
-           desc.includes('upload progress') || desc.includes('% uploaded') ||
-           desc.includes('progress bar'));
+        const isRealUploadInProgress = visionIndicatesRealUploadInProgress(desc);
         if (isRealUploadInProgress) {
           console.log(`[TikTok] LLM detected file upload still in progress, waiting extra 20s... (attempt ${visionAttempt + 1}/3)`);
           await page.waitForTimeout(20000);
@@ -1516,4 +1525,4 @@ async function uploadToTikTok(videoPath, metadata, credentials) {
   }
 }
 
-module.exports = { uploadToTikTok, __test: { isTikTokAuthUrl } };
+module.exports = { uploadToTikTok, __test: { isTikTokAuthUrl, visionIndicatesRealUploadInProgress } };
