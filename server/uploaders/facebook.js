@@ -261,8 +261,27 @@ async function insertFacebookTextIntoActiveComposer(page, fullText, { required =
   return target;
 }
 
+const FACEBOOK_PUBLISH_BUTTON_LABELS = [
+  'post',
+  'share',
+  'share now',
+  'publish',
+  'post now',
+  'share to feed',
+  'post to feed',
+  'publish now',
+  'share post',
+];
+
+const FACEBOOK_INTERMEDIATE_BUTTON_LABELS = [
+  'next',
+  'done',
+  'continue',
+  'next step',
+];
+
 async function clickVisibleDialogButton(page, names, timeout = 20000) {
-  const wanted = names.map((n) => String(n).toLowerCase());
+  const wanted = names.map((n) => String(n).trim().toLowerCase()).filter(Boolean);
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
@@ -278,31 +297,51 @@ async function clickVisibleDialogButton(page, names, timeout = 20000) {
       }
 
       function isDisabled(el) {
+        const style = window.getComputedStyle(el);
         return el.getAttribute('aria-disabled') === 'true'
           || el.getAttribute('disabled') !== null
+          || el.classList.contains('disabled')
+          || style.pointerEvents === 'none'
           || Boolean(el.closest('[aria-disabled="true"]'));
       }
 
-      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(isVisible);
+      function normalize(str) {
+        return String(str || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      }
+
+      function matchesCandidate(el) {
+        const text = normalize(el.innerText || el.textContent);
+        const aria = normalize(el.getAttribute('aria-label'));
+        const title = normalize(el.getAttribute('title'));
+
+        for (const candidate of [text, aria, title]) {
+          if (!candidate) continue;
+          if (wantedNames.includes(candidate)) return true;
+          // Strip trailing parentheticals, e.g. "share now (public)" -> "share now"
+          const stripped = candidate.replace(/\s*\([^)]*\)\s*$/, '').trim();
+          if (stripped && wantedNames.includes(stripped)) return true;
+        }
+        return false;
+      }
+
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[aria-modal="true"]')).filter(isVisible);
       const scopes = dialogs.length ? dialogs.reverse() : [document.body];
 
       for (const scope of scopes) {
-        const candidates = Array.from(scope.querySelectorAll('button, [role="button"]')).filter(isVisible);
+        const candidates = Array.from(scope.querySelectorAll('button, [role="button"], a[role="button"], div[tabindex="0"]')).filter(isVisible);
 
         for (const el of candidates) {
+          if (scope === document.body && el.closest('[role="article"]')) continue;
           if (isDisabled(el)) continue;
 
-          const text = (el.innerText || '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .toLowerCase();
-
-          const aria = (el.getAttribute('aria-label') || '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .toLowerCase();
-
-          if (wantedNames.some((name) => text === name || aria === name)) {
+          if (matchesCandidate(el)) {
+            try {
+              el.focus();
+            } catch {}
+            try {
+              el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+              el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            } catch {}
             el.click();
             return true;
           }
@@ -321,7 +360,7 @@ async function clickVisibleDialogButton(page, names, timeout = 20000) {
 
 async function clickFacebookNextSteps(page) {
   for (let step = 0; step < 4; step++) {
-    const clicked = await clickVisibleDialogButton(page, ['Next', 'Done'], 2500);
+    const clicked = await clickVisibleDialogButton(page, FACEBOOK_INTERMEDIATE_BUTTON_LABELS, 2500);
 
     if (!clicked) break;
 
@@ -386,12 +425,27 @@ async function attachImagesToFacebookComposer(page, imageFiles) {
   await clickFacebookNextSteps(page);
 }
 
-async function clickFacebookVerifiedPostButton(page) {
-  const clicked = await clickVisibleDialogButton(page, ['Post'], 30000);
+async function clickFacebookVerifiedPostButton(page, timeout = 45000) {
+  const deadline = Date.now() + timeout;
 
-  if (clicked) return true;
+  while (Date.now() < deadline) {
+    const published = await clickVisibleDialogButton(page, FACEBOOK_PUBLISH_BUTTON_LABELS, 1500);
+    if (published) {
+      console.log('[Facebook] Successfully clicked submit button (Post/Share/Publish).');
+      return true;
+    }
 
-  throw new Error('Could not click the Facebook Post button. Leaving source files for retry.');
+    const advanced = await clickVisibleDialogButton(page, FACEBOOK_INTERMEDIATE_BUTTON_LABELS, 1000);
+    if (advanced) {
+      console.log('[Facebook] Advanced through intermediate dialog step (Next/Done/Continue).');
+      await page.waitForTimeout(2000);
+      continue;
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  throw new Error('Could not click the Facebook Post or Share button. Leaving source files for retry.');
 }
 
 async function waitForFacebookPublishToFinish(page) {
@@ -1304,5 +1358,9 @@ module.exports = {
     findVisibleComposerTextbox,
     insertFacebookTextIntoActiveComposer,
     normalizeFacebookComposerText,
+    clickVisibleDialogButton,
+    clickFacebookVerifiedPostButton,
+    FACEBOOK_PUBLISH_BUTTON_LABELS,
+    FACEBOOK_INTERMEDIATE_BUTTON_LABELS,
   },
 };

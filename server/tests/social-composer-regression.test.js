@@ -207,6 +207,66 @@ test('Facebook keeps correct composer text after media changes and ignores comme
   await page.close();
 });
 
+test('Facebook verified post button finds and clicks Share now, Share, and Publish variants', async () => {
+  for (const label of ['Share now', 'Share', 'Publish', 'Post']) {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <div role="dialog">
+        <div role="button" tabindex="0" id="btn" aria-label="${label}"><span>${label}</span></div>
+      </div>
+      <script>
+        document.querySelector('#btn').addEventListener('click', () => {
+          document.body.dataset.clicked = '${label}';
+        });
+      </script>
+    `);
+
+    assert.equal(await facebook.clickFacebookVerifiedPostButton(page, 2000), true);
+    assert.equal(await page.evaluate(() => document.body.dataset.clicked), label);
+    await page.close();
+  }
+});
+
+test('Facebook verified post button advances intermediate Next step before clicking Share', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <div role="dialog" id="composer-dlg">
+      <button id="step-btn">Next</button>
+    </div>
+    <script>
+      document.querySelector('#step-btn').addEventListener('click', () => {
+        document.body.dataset.advanced = 'true';
+        document.querySelector('#composer-dlg').innerHTML = '<div role="button" tabindex="0" id="final-btn">Share now</div>';
+        document.querySelector('#final-btn').addEventListener('click', () => {
+          document.body.dataset.shared = 'true';
+        });
+      });
+    </script>
+  `);
+
+  assert.equal(await facebook.clickFacebookVerifiedPostButton(page, 5000), true);
+  assert.equal(await page.evaluate(() => document.body.dataset.advanced), 'true');
+  assert.equal(await page.evaluate(() => document.body.dataset.shared), 'true');
+  await page.close();
+});
+
+test('Facebook clickVisibleDialogButton ignores feed article actions and clicks dialog Share button', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <div role="article">
+      <button id="feed-share" onclick="document.body.dataset.clickedFeed = 'true'">Share</button>
+    </div>
+    <div role="dialog">
+      <div role="button" tabindex="0" id="dialog-share" onclick="document.body.dataset.clickedDialog = 'true'">Share now</div>
+    </div>
+  `);
+
+  assert.equal(await facebook.clickFacebookVerifiedPostButton(page, 2000), true);
+  assert.equal(await page.evaluate(() => document.body.dataset.clickedDialog), 'true');
+  assert.equal(await page.evaluate(() => document.body.dataset.clickedFeed), undefined);
+  await page.close();
+});
+
 test('TikTok recognizes an upload redirect to login as recoverable authentication', () => {
   assert.equal(tiktok.isTikTokAuthUrl('https://www.tiktok.com/login?redirect_url=%2Ftiktokstudio%2Fupload'), true);
   assert.equal(tiktok.isTikTokAuthUrl('https://passport.tiktok.com/login/'), true);
