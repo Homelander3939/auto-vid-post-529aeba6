@@ -839,7 +839,7 @@ app.get('/api/health', async (req, res) => {
   // model, wait for the CLI, or turn optional AI downtime into core downtime.
   const aiProbe = await probeOptionalLocalAI(config.url, { timeoutMs: 900 });
   res.json(buildRuntimeHealth({
-    runtimeContractVersion: 8,
+    runtimeContractVersion: 9,
     database: DB_FILE,
     counts: Object.fromEntries([
       'platform_accounts', 'social_post_accounts', 'schedule_config', 'social_post_schedules',

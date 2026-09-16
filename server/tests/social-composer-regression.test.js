@@ -267,6 +267,40 @@ test('Facebook clickVisibleDialogButton ignores feed article actions and clicks 
   await page.close();
 });
 
+test('Facebook image preparer preserves JPEG and PNG paths untouched', async () => {
+  const input = ['C:/fake/path/image1.jpg', 'C:/fake/path/image2.PNG', 'C:/fake/path/image3.jpeg'];
+  const res = await facebook.prepareFacebookCompatibleImages(input, null);
+  assert.deepEqual(res.convertedFiles, input);
+  assert.equal(res.tempFilesToClean.length, 0);
+});
+
+test('Facebook image preparer converts WEBP to JPEG and returns temp files for cleanup', async () => {
+  const fs = require('fs');
+  const path = require('path');
+  const tempDir = path.join(__dirname, '..', 'data', 'temp');
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  // Use a real webp fixture from D:\news posts if available, or generate a dummy webp
+  const testWebpCandidates = [
+    'D:\\news posts\\2026-09-16-evening-post-01-story-01-ai-openai-anthropic-google-frontier-ai-standards-body-2026-09-16-night.webp',
+  ];
+  const realWebp = testWebpCandidates.find((f) => fs.existsSync(f));
+
+  if (realWebp) {
+    const res = await facebook.prepareFacebookCompatibleImages([realWebp], null);
+    assert.equal(res.convertedFiles.length, 1);
+    assert.notEqual(res.convertedFiles[0], realWebp);
+    assert.match(res.convertedFiles[0], /\.jpg$/i);
+    assert.equal(fs.existsSync(res.convertedFiles[0]), true);
+    assert.equal(res.tempFilesToClean.length, 1);
+
+    // Clean up test converted file
+    for (const f of res.tempFilesToClean) {
+      try { fs.unlinkSync(f); } catch {}
+    }
+  }
+});
+
 test('TikTok recognizes an upload redirect to login as recoverable authentication', () => {
   assert.equal(tiktok.isTikTokAuthUrl('https://www.tiktok.com/login?redirect_url=%2Ftiktokstudio%2Fupload'), true);
   assert.equal(tiktok.isTikTokAuthUrl('https://passport.tiktok.com/login/'), true);

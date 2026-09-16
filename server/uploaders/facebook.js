@@ -2,8 +2,108 @@
 // Full replacement for facebook.js.
 // Keeps existing external contract: module.exports = { uploadToFacebook }.
 
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { launchPersistent, safeClose } = require('./social-post-base');
 const { attemptUploadArbiter } = require('./upload-arbiter');
+
+function findFfmpegExecutable() {
+  const candidates = [
+    process.env.FFMPEG_PATH,
+    'C:\\Users\\anani\\Documents\\Codex\\2026-04-18-i-need-to-make-you-my-2\\tools\\ffmpeg\\extract\\ffmpeg-8.1-essentials_build\\bin\\ffmpeg.exe',
+    'C:\\ffmpeg\\bin\\ffmpeg.exe',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+  return 'ffmpeg';
+}
+
+function convertWebpToJpegWithFfmpeg(srcPath, destPath) {
+  const ffmpeg = findFfmpegExecutable();
+  const args = ['-y', '-i', srcPath, '-frames:v', '1', '-q:v', '2', destPath];
+  execFileSync(ffmpeg, args, { stdio: 'pipe', timeout: 30000 });
+  return fs.existsSync(destPath) && fs.statSync(destPath).size > 0;
+}
+
+async function convertImageWithBrowser(page, srcPath, destPath) {
+  if (!page || typeof page.evaluate !== 'function') return false;
+  const base64 = fs.readFileSync(srcPath).toString('base64');
+  const ext = path.extname(srcPath).toLowerCase().replace('.', '') || 'webp';
+  const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+  const dataUrl = `data:${mime};base64,${base64}`;
+
+  const jpegDataUrl = await page.evaluate(async (url) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
+      };
+      img.onerror = () => reject(new Error('Failed to load image in canvas'));
+      img.src = url;
+    });
+  }, dataUrl);
+
+  const base64Data = jpegDataUrl.replace(/^data:image\/jpeg;base64,/, '');
+  fs.writeFileSync(destPath, Buffer.from(base64Data, 'base64'));
+  return fs.existsSync(destPath) && fs.statSync(destPath).size > 0;
+}
+
+async function prepareFacebookCompatibleImages(imageFiles, page) {
+  const convertedFiles = [];
+  const tempFilesToClean = [];
+
+  const tempDir = path.join(__dirname, '..', 'data', 'temp');
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  for (let i = 0; i < imageFiles.length; i++) {
+    const src = imageFiles[i];
+    const ext = path.extname(src).toLowerCase();
+
+    // Facebook supports JPEG and PNG reliably; WEBP is rejected as 'Unsupported file type' by Facebook web composer.
+    if (ext === '.jpg' || ext === '.jpeg' || ext === '.png') {
+      convertedFiles.push(src);
+      continue;
+    }
+
+    const tempDest = path.join(tempDir, `fb_compat_${Date.now()}_${i}.jpg`);
+    let ok = false;
+
+    try {
+      ok = convertWebpToJpegWithFfmpeg(src, tempDest);
+    } catch (e) {
+      console.warn(`[Facebook] FFmpeg conversion failed for ${path.basename(src)}: ${e.message}`);
+    }
+
+    if (!ok && page) {
+      try {
+        ok = await convertImageWithBrowser(page, src, tempDest);
+      } catch (e) {
+        console.warn(`[Facebook] Browser canvas conversion failed for ${path.basename(src)}: ${e.message}`);
+      }
+    }
+
+    if (ok) {
+      console.log(`[Facebook] Converted ${path.basename(src)} to JPEG for Facebook upload compatibility.`);
+      convertedFiles.push(tempDest);
+      tempFilesToClean.push(tempDest);
+    } else {
+      console.warn(`[Facebook] Could not convert ${path.basename(src)}; uploading original.`);
+      convertedFiles.push(src);
+    }
+  }
+
+  return { convertedFiles, tempFilesToClean };
+}
 
 function normalizeFacebookPermalink(raw) {
   if (!raw) return null;
@@ -336,6 +436,9 @@ async function clickVisibleDialogButton(page, names, timeout = 20000) {
 
           if (matchesCandidate(el)) {
             try {
+              el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            } catch {}
+            try {
               el.focus();
             } catch {}
             try {
@@ -443,6 +546,19 @@ async function clickFacebookVerifiedPostButton(page, timeout = 45000) {
     }
 
     await page.waitForTimeout(500);
+  }
+
+  const dialogError = await page.evaluate(() => {
+    const errorNodes = Array.from(document.querySelectorAll('div[role="alert"], div[role="dialog"] [class*="error" i], div[role="dialog"] [class*="alert" i], div[role="dialog"] span, div[role="dialog"] div'))
+      .filter((el) => {
+        const t = (el.innerText || el.textContent || '').trim();
+        return /(can't be uploaded|unsupported file type|could not upload|something went wrong|failed to upload)/i.test(t);
+      });
+    return errorNodes[0] ? (errorNodes[0].innerText || errorNodes[0].textContent).trim() : null;
+  }).catch(() => null);
+
+  if (dialogError) {
+    throw new Error(`Could not click the Facebook Post or Share button. Facebook dialog error: ${dialogError}. Leaving source files for retry.`);
   }
 
   throw new Error('Could not click the Facebook Post or Share button. Leaving source files for retry.');
@@ -1249,10 +1365,11 @@ async function resolveFacebookPostedUrl(page, targetUrl, fullText, opts = {}) {
 }
 
 async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts = {}) {
-  const imageFiles = Array.isArray(imagePath)
+  const originalImageFiles = Array.isArray(imagePath)
     ? imagePath.filter(Boolean)
     : (imagePath ? [imagePath] : []);
 
+  let tempFilesToClean = [];
   const context = await launchPersistent('facebook', opts);
 
   try {
@@ -1263,6 +1380,10 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     const page = context.pages()[0] || await context.newPage();
 
     await prepareFacebookViewport(page);
+
+    const prepared = await prepareFacebookCompatibleImages(originalImageFiles, page);
+    const imageFiles = prepared.convertedFiles;
+    tempFilesToClean = prepared.tempFilesToClean;
 
     const targetUrl = (opts && opts.targetUrl && /^https?:\/\//i.test(opts.targetUrl))
       ? opts.targetUrl
@@ -1348,6 +1469,9 @@ async function uploadToFacebook(imagePath, { description, hashtags = [] }, opts 
     console.log(`[Facebook] Successfully posted and copied link: ${finalUrl}`);
     return { url: finalUrl };
   } finally {
+    for (const f of tempFilesToClean) {
+      try { fs.unlinkSync(f); } catch {}
+    }
     await safeClose(context);
   }
 }
@@ -1362,5 +1486,7 @@ module.exports = {
     clickFacebookVerifiedPostButton,
     FACEBOOK_PUBLISH_BUTTON_LABELS,
     FACEBOOK_INTERMEDIATE_BUTTON_LABELS,
+    prepareFacebookCompatibleImages,
+    convertWebpToJpegWithFfmpeg,
   },
 };
