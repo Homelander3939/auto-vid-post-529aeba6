@@ -371,6 +371,12 @@ const FACEBOOK_PUBLISH_BUTTON_LABELS = [
   'post to feed',
   'publish now',
   'share post',
+  'post public',
+  'post publicly',
+  'share public',
+  'share publicly',
+  'share to public',
+  'post to public',
 ];
 
 const FACEBOOK_INTERMEDIATE_BUTTON_LABELS = [
@@ -420,6 +426,13 @@ async function clickVisibleDialogButton(page, names, timeout = 20000) {
           // Strip trailing parentheticals, e.g. "share now (public)" -> "share now"
           const stripped = candidate.replace(/\s*\([^)]*\)\s*$/, '').trim();
           if (stripped && wantedNames.includes(stripped)) return true;
+
+          // Also match when candidate starts with a wanted publish verb followed by audience or action:
+          for (const w of wantedNames) {
+            if (candidate.startsWith(w + ' ') && !/(options|settings|format|menu|tools|help)/i.test(candidate)) {
+              return true;
+            }
+          }
         }
         return false;
       }
@@ -637,15 +650,19 @@ async function waitForFacebookShareDialog(page, timeout = 9000) {
           && style.visibility !== 'hidden';
       }
 
-      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]')).filter(isVisible);
+      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="menu"], div[aria-modal="true"], div[aria-label*="Share" i]')).filter(isVisible);
 
       return dialogs.some((dialog) => {
         const text = (dialog.innerText || '').toLowerCase();
 
         return text.includes('copy link')
+          || text.includes('copy')
           || text.includes('share now')
           || text.includes('whatsapp')
-          || text.includes('your story');
+          || text.includes('messenger')
+          || text.includes('your story')
+          || text.includes('send in')
+          || text.includes('share to');
       });
     }).catch(() => false);
 
@@ -677,14 +694,14 @@ async function getCopyLinkClickPoints(page) {
     }
 
     const points = [];
-    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'))
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="menu"], div[aria-modal="true"], div[aria-label*="Share" i]'))
       .filter(isVisible)
       .reverse();
 
     for (const dialog of dialogs) {
       const dialogText = (dialog.innerText || '').toLowerCase();
 
-      if (!dialogText.includes('copy link')) continue;
+      if (!dialogText.includes('copy link') && !dialogText.includes('copy')) continue;
 
       const d = dialog.getBoundingClientRect();
       const all = Array.from(dialog.querySelectorAll('*')).filter(isVisible);
@@ -695,8 +712,16 @@ async function getCopyLinkClickPoints(page) {
           .replace(/\s+/g, ' ')
           .trim()
           .toLowerCase();
+        const aria = (el.getAttribute?.('aria-label') || '').trim().toLowerCase();
 
-        return text === 'copy link';
+        return text === 'copy link'
+          || text === 'copy link to post'
+          || text.startsWith('copy link')
+          || text === 'copy'
+          || aria === 'copy link'
+          || aria === 'copy link to post'
+          || aria.startsWith('copy link')
+          || aria === 'copy';
       });
 
       for (const labelEl of labelElements) {
