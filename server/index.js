@@ -2686,7 +2686,7 @@ app.post('/api/browser-profiles/open', async (req, res) => {
 });
 
 // --- Social posts processing ---
-const { processSocialPost, pollDueSocialPosts } = require('./socialPostProcessor');
+const { prepareMissingPlatformRetry, processSocialPost, pollDueSocialPosts } = require('./socialPostProcessor');
 
 app.post('/api/social-posts/process/:id', (req, res) => {
   const id = req.params.id;
@@ -4401,4 +4401,44 @@ app.listen(PORT, () => {
     await recoverInterruptedUploadState().catch((error) => console.warn('[Recovery] Upload startup recovery failed:', error.message));
     setupCron();
   })();
+});
+
+app.post('/api/social-posts/recover-techpulse-cycle', async (req, res) => {
+  try {
+    const marker = String(req.body?.marker || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}-(morning|evening)-post-$/.test(marker)) {
+      return res.status(400).json({ error: 'A valid TechPulse cycle marker is required.' });
+    }
+    const { data: rows, error } = await supabase.from('social_posts').select('*');
+    if (error) throw error;
+    const matches = (rows || []).filter((post) =>
+      Array.isArray(post?.source_meta?.files)
+      && post.source_meta.files.some((name) => String(name || '').startsWith(marker))
+    );
+    const summary = { matched: matches.length, retried: [], active: [], complete: [] };
+    for (const post of matches) {
+      const retry = prepareMissingPlatformRetry(post);
+      if (retry.recentlyProcessing) {
+        summary.active.push(post.id);
+        continue;
+      }
+      if (!retry.canRetry) {
+        summary.complete.push(post.id);
+        continue;
+      }
+      await supabase.from('social_posts').update({
+        status: 'pending',
+        platform_results: retry.results,
+        completed_at: null,
+      }).eq('id', post.id);
+      await processSocialPost(supabase, post.id, async (msg) => {
+        const settings = await getSettings().catch(() => null);
+        if (settings) await notifyTelegram(settings, msg);
+      });
+      summary.retried.push({ id: post.id, platforms: retry.retryPlatforms });
+    }
+    res.json({ ok: true, summary });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });

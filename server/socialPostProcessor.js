@@ -11,6 +11,29 @@ const { getBrowserProfileForAccount, getJobAccountSelections } = require('./brow
 const uploaders = { x: uploadToX, facebook: uploadToFacebook, linkedin: uploadToLinkedIn, tiktok: uploadToTikTokPost };
 
 const processing = new Set();
+const ACTIVE_PROCESSING_WINDOW_MS = 30 * 60 * 1000;
+
+function prepareMissingPlatformRetry(post, nowMs = Date.now()) {
+  const sourceResults = Array.isArray(post?.platform_results) && post.platform_results.length
+    ? post.platform_results
+    : (post?.target_platforms || []).map((name) => ({ name, status: 'pending' }));
+  const updatedAt = Date.parse(post?.updated_at || post?.created_at || '');
+  const recentlyProcessing = post?.status === 'processing'
+    && Number.isFinite(updatedAt)
+    && nowMs - updatedAt < ACTIVE_PROCESSING_WINDOW_MS;
+  const results = sourceResults.map((result) => {
+    if (result.status === 'success' && result.url) return { ...result };
+    const { error, url, ...rest } = result;
+    return { ...rest, status: 'pending' };
+  });
+  const retryPlatforms = results.filter((result) => result.status === 'pending').map((result) => result.name);
+  return {
+    canRetry: !recentlyProcessing && retryPlatforms.length > 0,
+    recentlyProcessing,
+    retryPlatforms,
+    results,
+  };
+}
 const SOURCE_IMAGE_RE = /\.(jpe?g|png|webp)$/i;
 
 function normalizeLocalFolderPath(folder) {
@@ -364,4 +387,4 @@ async function pollDueSocialPosts(supabase, notify) {
   }
 }
 
-module.exports = { processSocialPost, pollDueSocialPosts };
+module.exports = { prepareMissingPlatformRetry, processSocialPost, pollDueSocialPosts };
