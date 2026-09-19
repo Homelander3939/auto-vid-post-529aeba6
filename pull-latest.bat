@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 title Video Uploader - Safe Local Launcher
 
-set "SAFE_LAUNCHER=C:\fantasai-chronicles\Start_Video_Uploader.bat"
+set "SAFE_LAUNCHER=D:\fantasai-chronicles\Start_Video_Uploader.bat"
 
 if not exist "%SAFE_LAUNCHER%" (
   echo [ERROR] Safe local uploader launcher not found: %SAFE_LAUNCHER%

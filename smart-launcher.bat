@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 title Local Video Uploader - Smart Launcher
 
-set "SAFE_LAUNCHER=C:\fantasai-chronicles\Start_Video_Uploader.bat"
+set "SAFE_LAUNCHER=D:\fantasai-chronicles\Start_Video_Uploader.bat"
 
 if not exist "%SAFE_LAUNCHER%" (
   echo [ERROR] Safe local uploader launcher not found: %SAFE_LAUNCHER%
@@ -16,6 +16,6 @@ call "%SAFE_LAUNCHER%" %*
 set "LAUNCH_EXIT=!ERRORLEVEL!"
 if not "!LAUNCH_EXIT!"=="0" (
   echo [ERROR] Local uploader launcher returned exit code !LAUNCH_EXIT!.
-  echo Review C:\fantasai-chronicles\logs\local-uploader-runtime.log
+  echo Review D:\fantasai-chronicles\logs\local-uploader-runtime.log
 )
 exit /b !LAUNCH_EXIT!
