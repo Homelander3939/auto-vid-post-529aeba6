@@ -27,7 +27,6 @@ const {
   listRows,
   seedRecoveredAccounts,
 } = require('./localDatabase');
-const { startLocalBackupSchedule } = require('./localBackup');
 const { uploadToYouTube } = require('./uploaders/youtube');
 const { uploadToTikTok } = require('./uploaders/tiktok');
 const { uploadToInstagram } = require('./uploaders/instagram');
@@ -4396,7 +4395,6 @@ app.listen(PORT, () => {
   console.log(`   Local database: ${DB_FILE}`);
   console.log(`   AI: LM Studio at ${LM_STUDIO_URL}`);
   console.log(`   Mode: Local Playwright automation + Local AI\n`);
-  startLocalBackupSchedule();
   startLocalTelegramPoller({ supabase, getSettings });
   (async () => {
     await recoverInterruptedAgentRuns().catch((error) => console.warn('[LocalAgent] Startup recovery failed:', error.message));
